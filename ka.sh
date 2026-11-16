@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.52        归档文件: ka-v<版本>.sh
+#  版本: 0.0.55        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.52"
+KA_VERSION="0.0.55"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -1751,7 +1751,7 @@ adv_run() { # 标题 副标题 绘制函数 编辑函数 项数
 
 ADV_MORE_DRAW="adv_draw2"
 ADV_MORE_EDIT="adv_edit2"
-ADV_MORE_N=10
+ADV_MORE_N=9
 
 adv_draw1() {
   local s="$1"
@@ -1763,8 +1763,9 @@ adv_draw1() {
   cfg_row 5 "$s" "包含缓冲区内存" "$(toggle_render "$MEM_CACHE")"
   cfg_row 6 "$s" "从网卡获取 IP"  "$(toggle_render "$GET_IP_NIC")"
   cfg_row 7 "$s" "详细 GPU 监控"  "$(toggle_render "$GPU_MONITOR")"
-  cfg_row 8 "$s" "更多设置"       "${GRAY}网络 / 磁盘 / 安装 →${RESET}"
-  cfg_row 9 "$s" "完成并继续"     "${GREEN}→${RESET}"
+  cfg_row 8 "$s" "安装间隔"       "${YELL}${INSTALL_DELAY:-0}${RESET} 秒（0=不等待）"
+  cfg_row 9 "$s" "更多设置"       "${GRAY}网络 / 磁盘 / 安装 →${RESET}"
+  cfg_row 10 "$s" "完成并继续"    "${GREEN}→${RESET}"
 }
 
 adv_edit1() {
@@ -1777,8 +1778,12 @@ adv_edit1() {
     5) [ "$MEM_CACHE" -eq 1 ] && MEM_CACHE=0 || MEM_CACHE=1 ;;
     6) [ "$GET_IP_NIC" -eq 1 ] && GET_IP_NIC=0 || GET_IP_NIC=1 ;;
     7) [ "$GPU_MONITOR" -eq 1 ] && GPU_MONITOR=0 || GPU_MONITOR=1 ;;
-    8) adv_run "更多设置" "网卡 / 挂载点 / 安装项" "$ADV_MORE_DRAW" "$ADV_MORE_EDIT" "$ADV_MORE_N" ;;
-    9) return 1 ;;
+    8) edit_str "安装间隔（秒，可小数，0=不等待）" INSTALL_DELAY
+       case "$INSTALL_DELAY" in
+         ''|*[!0-9.]*) INSTALL_DELAY="0"; warn "已重置为 0" ;;
+       esac ;;
+    9) adv_run "更多设置" "网卡 / 挂载点 / 安装项" "$ADV_MORE_DRAW" "$ADV_MORE_EDIT" "$ADV_MORE_N" ;;
+    10) return 1 ;;
   esac
   return 0
 }
@@ -1798,8 +1803,7 @@ adv_draw2() {
   cfg_row 5 "$s" "GitHub 代理"  "${WHITE}${GH_PROXY:-直连}${RESET}"
   cfg_row 6 "$s" "额外参数"     "${WHITE}${EXTRA_AGENT:-无}${RESET}"
   cfg_row 7 "$s" "Agent 实现"   "$impl_txt"
-  cfg_row 8 "$s" "安装间隔"     "${YELL}${INSTALL_DELAY:-0}${RESET} 秒（0=不等待）"
-  cfg_row 9 "$s" "返回"         "${GREEN}←${RESET}"
+  cfg_row 8 "$s" "返回"         "${GREEN}←${RESET}"
 }
 
 multi_nics() {
@@ -1829,11 +1833,7 @@ adv_edit2() {
     5) edit_str "GitHub 代理（如 https://ghproxy.net，空=直连）" GH_PROXY ;;
     6) edit_str "额外参数（原样传给 agent，空=无）" EXTRA_AGENT ;;
     7) if [ "$AGENT_IMPL" = "zig" ]; then AGENT_IMPL="go"; else AGENT_IMPL="zig"; fi ;;
-    8) edit_str "安装间隔（秒，可小数，0=不等待）" INSTALL_DELAY
-       case "$INSTALL_DELAY" in
-         ''|*[!0-9.]*) INSTALL_DELAY="0"; warn "已重置为 0" ;;
-       esac ;;
-    9) return 1 ;;
+    8) return 1 ;;
   esac
   return 0
 }
@@ -1870,7 +1870,7 @@ step_advanced() {
     step_advanced_plain
     return 0
   fi
-  adv_run "高级参数" "默认值够用，Esc 或「完成」继续" adv_draw1 adv_edit1 10
+  adv_run "高级参数" "默认值够用，Esc 或「完成」继续" adv_draw1 adv_edit1 11
 }
 
 step_advanced_plain() {
@@ -2206,6 +2206,18 @@ do_install() {
   need_root; need_curl
   # 尽量放开进程数上限，批量起服务时 openrc-run 需要 fork
   ulimit -u unlimited 2>/dev/null || ulimit -u 8192 2>/dev/null || true
+  # 容器里若 cgroup 可写，顺手把 pids 上限调到 max
+  if [ -r /sys/fs/cgroup/pids.max ]; then
+    local pm_before pm_after
+    pm_before="$(cat /sys/fs/cgroup/pids.max 2>/dev/null)"
+    if [ -n "$pm_before" ] && [ "$pm_before" != "max" ]; then
+      printf 'max' > /sys/fs/cgroup/pids.max 2>/dev/null || true
+      pm_after="$(cat /sys/fs/cgroup/pids.max 2>/dev/null)"
+      if [ -n "$pm_after" ] && [ "$pm_after" != "$pm_before" ]; then
+        ok "容器 pids 上限已从 $pm_before 调到 $pm_after"
+      fi
+    fi
+  fi
   save_conf
   build_args
   install_args
@@ -2569,6 +2581,12 @@ cmd_doctor() {
       dim "$gpu_cnt 个实例开启了 GPU 监控（--gpu），没有显卡建议关掉"
     fi
   fi
+  local pmax pcur
+  pmax="$(cat /sys/fs/cgroup/pids.max 2>/dev/null)"
+  pcur="$(cat /sys/fs/cgroup/pids.current 2>/dev/null)"
+  if [ -n "$pmax" ] || [ -n "$pcur" ]; then
+    dim "任务数：${pcur:-?} / ${pmax:-?}（容器 pids 上限；ulimit -u $(ulimit -u 2>/dev/null)）"
+  fi
   printf '  %s%d/%d 个实例在运行%s\n\n' "$GRAY" "$okc" "$D_COUNT" "$RESET"
 }
 
@@ -2781,13 +2799,13 @@ cmd_edit_params() {
   ADV_MORE_EDIT="inst_edit2"
   ADV_MORE_N=6
   if [ "$UI_TUI" -eq 1 ]; then
-    adv_run "修改参数" "$n · Esc 取消" adv_draw1 adv_edit1 10
+    adv_run "修改参数" "$n · Esc 取消" adv_draw1 adv_edit1 11
   else
     step_advanced_plain
   fi
   ADV_MORE_DRAW="adv_draw2"
   ADV_MORE_EDIT="adv_edit2"
-  ADV_MORE_N=10
+  ADV_MORE_N=9
 
   build_args
   blank
@@ -3112,13 +3130,13 @@ cmd_batch() {
     ADV_MORE_EDIT="inst_edit2"
     ADV_MORE_N=6
     if [ "$UI_TUI" -eq 1 ]; then
-      adv_run "批量修改参数" "编辑一次，套用到 ${#targets[@]} 个实例" adv_draw1 adv_edit1 10
+      adv_run "批量修改参数" "编辑一次，套用到 ${#targets[@]} 个实例" adv_draw1 adv_edit1 11
     else
       step_advanced_plain
     fi
     ADV_MORE_DRAW="adv_draw2"
     ADV_MORE_EDIT="adv_edit2"
-    ADV_MORE_N=10
+    ADV_MORE_N=9
   fi
 
   blank
