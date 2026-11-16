@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.0.32-d6336c?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-0.0.34-d6336c?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/platform-Linux-7048e8?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/init-systemd%20%7C%20OpenRC-1c7ed6?style=flat-square" alt="init">
   <img src="https://img.shields.io/badge/shell-bash%204%2B-0ca678?style=flat-square" alt="shell">
@@ -22,7 +22,7 @@
 ```
   K O M A R I   A G E N T
   ────────────────────────────────────────
-  ka v0.0.32  · 多实例部署 · NAT 友好
+  ka v0.0.34  · 多实例部署 · NAT 友好
 ```
 
 ## 功能特性
@@ -74,10 +74,11 @@ ka
 ```
   K O M A R I   A G E N T
   ────────────────────────────────────────
-  ● CPU 8% ░░░░░  ● 内存 43% ██░░░  ● 磁盘 21% █░░░░  ● 负载 0.12
+  ● CPU 8% ░░░░░  ● 内存 43% 1.6/3.9G ██░░░
+  ● 磁盘 4% 20/512M █░░░░  ● 负载 0.12
 
   ┃  主菜单
-     v0.0.32 · OpenRC · 已发现 1 个实例
+     v0.0.34 · OpenRC · 已发现 1 个实例
 
    ❯ 安装 / 新增实例
      实例管理

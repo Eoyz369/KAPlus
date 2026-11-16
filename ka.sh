@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.32        归档文件: ka-v<版本>.sh
+#  版本: 0.0.34        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.32"
+KA_VERSION="0.0.34"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -257,6 +257,21 @@ CPU_PI=""
 SYS_TS=0
 MEMPCT=""
 DISKPCT=""
+MEM_TOTAL_KB=0
+MEM_USED_KB=0
+DISK_TOTAL_KB=0
+DISK_USED_KB=0
+
+human_kb() {
+  local kb="${1:-0}"
+  if [ "$kb" -ge 1048576 ]; then
+    awk "BEGIN{printf \"%.1fG\", $kb/1048576}"
+  elif [ "$kb" -ge 1024 ]; then
+    awk "BEGIN{printf \"%.0fM\", $kb/1024}"
+  else
+    printf '%sK' "$kb"
+  fi
+}
 
 mem_used_pct() {
   local key val total="" avail="" free="" buf="" cached=""
@@ -269,23 +284,41 @@ mem_used_pct() {
       Cached:)       cached="$val" ;;
     esac
   done < /proc/meminfo 2>/dev/null
-  if [ -z "$total" ] || [ "${total:-0}" -le 0 ]; then return 0; fi
+  MEM_TOTAL_KB="${total:-0}"
+  if [ "$MEM_TOTAL_KB" -le 0 ]; then return 0; fi
   if [ -z "$avail" ]; then
     avail=$(( ${free:-0} + ${buf:-0} + ${cached:-0} ))
   fi
-  printf '%s' $(((total - avail) * 100 / total))
+  MEM_USED_KB=$((MEM_TOTAL_KB - avail))
+  if [ "$MEM_USED_KB" -lt 0 ]; then MEM_USED_KB=0; fi
+  printf '%s' $((MEM_USED_KB * 100 / MEM_TOTAL_KB))
 }
 
 disk_used_pct() {
-  local line total used
+  local line total used cap i n pct
   line="$(df -k "${BASE_DIR:-/}" 2>/dev/null | tail -n 1)"
   [ -n "$line" ] || return 0
-  set -- $line
-  total="${2:-0}"
-  used="${3:-0}"
-  if [ "$total" -gt 0 ]; then
-    printf '%s' $((used * 100 / total))
-  fi
+  local -a f=()
+  read -r -a f <<< "$line"
+  n="${#f[@]}"
+  cap=0
+  for ((i = 0; i < n; i++)); do
+    case "${f[$i]}" in
+      *%) cap=$((i + 1)); break ;;
+    esac
+  done
+  # 以百分号列定位：total 在它前 3 列，used 在前 2 列
+  [ "$cap" -ge 4 ] || return 0
+  total="${f[$((cap - 4))]}"
+  used="${f[$((cap - 3))]}"
+  case "$total" in ''|*[!0-9]*) return 0 ;; esac
+  case "$used" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$total" -gt 0 ] || return 0
+  DISK_TOTAL_KB="$total"
+  DISK_USED_KB="$used"
+  pct=$((used * 100 / total))
+  [ "$pct" -gt 100 ] && pct=100
+  printf '%s' "$pct"
 }
 
 refresh_sys() {
@@ -317,7 +350,7 @@ cpu_pct() {
 }
 
 metric_seg() {
-  local label="$1" pct="$2" col bar i filled
+  local label="$1" pct="$2" detail="${3:-}" col bar i filled
   if [ -z "$pct" ]; then
     printf '%s●%s %s --' "$GRAY" "$RESET" "$label"
     return 0
@@ -337,18 +370,26 @@ metric_seg() {
       bar+="${GRAY}${G_EMPTY}"
     fi
   done
-  printf '%s●%s %s %s%% %s%s' "$col" "$RESET" "$label" "$pct" "$bar" "$RESET"
+  printf '%s●%s %s %s%% %s%s%s' \
+    "$col" "$RESET" "$label" "$pct" "${detail:+$detail }" "$bar" "$RESET"
 }
 
 sys_line() {
   refresh_sys
-  local cpu load
+  local cpu load memd="" diskd=""
   cpu="$(cpu_pct)"
   load="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
-  printf '%s  %s  %s  %s●%s 负载 %s' \
+  if [ "${MEM_TOTAL_KB:-0}" -gt 0 ]; then
+    memd="$(human_kb "$MEM_USED_KB")/$(human_kb "$MEM_TOTAL_KB")"
+  fi
+  if [ "${DISK_TOTAL_KB:-0}" -gt 0 ]; then
+    diskd="$(human_kb "$DISK_USED_KB")/$(human_kb "$DISK_TOTAL_KB")"
+  fi
+  printf '  %s  %s\n' \
     "$(metric_seg "CPU" "$cpu")" \
-    "$(metric_seg "内存" "$MEMPCT")" \
-    "$(metric_seg "磁盘" "$DISKPCT")" \
+    "$(metric_seg "内存" "$MEMPCT" "$memd")"
+  printf '  %s  %s●%s 负载 %s' \
+    "$(metric_seg "磁盘" "$DISKPCT" "$diskd")" \
     "$GRAY" "$RESET" "${load:-—}"
 }
 
@@ -356,7 +397,7 @@ draw_header() {
   local title="$1" sub="${2:-}" line
   printf '  %s\n' "$(rainbow 'K O M A R I   A G E N T')"
   printf '  %s%s%s\n' "$GRAY" "$(repeat "$G_RULE" 40)" "$RESET"
-  printf '  %s\n' "$(sys_line)"
+  printf '%s\n' "$(sys_line)"
   printf '\n'
   printf '  %s%s%s  %s%s%s\n' "$PINK" "$G_BAR" "$RESET" "$B" "$title" "$RESET"
   if [ -n "$sub" ]; then
