@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.23        归档文件: ka-v<版本>.sh
+#  版本: 0.0.25        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.23"
+KA_VERSION="0.0.25"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -665,6 +665,7 @@ load_conf() {
   INSTALL_VERSION="${KA_INSTALL_VERSION:-$INSTALL_VERSION}"
   GH_PROXY="${KA_GH_PROXY:-$GH_PROXY}"
   INSTANCE_COUNT="${KA_INSTANCE_COUNT:-$INSTANCE_COUNT}"
+  AGENT_IMPL="${KA_IMPL:-$AGENT_IMPL}"
 }
 
 save_conf() {
@@ -693,6 +694,7 @@ KA_EXTRA='$EXTRA_AGENT'
 KA_INSTALL_VERSION='$INSTALL_VERSION'
 KA_GH_PROXY='$GH_PROXY'
 KA_INSTANCE_COUNT='$INSTANCE_COUNT'
+KA_IMPL='$AGENT_IMPL'
 EOF
   ) 2>/dev/null || true
 }
@@ -1211,6 +1213,17 @@ reinstall_service() { # 目录 服务名 面板 [token] [额外参数] [自动�
   elif [ -n "$tk" ]; then
     auth=(-t "$tk")
   fi
+
+  if [ "$AGENT_IMPL" = "zig" ]; then
+    prepare_agent_cache zig 0 || return 1
+    local args="-e $ep"
+    [ -n "$tk" ] && args+=" -t $tk"
+    [ -n "$ad" ] && args+=" --auto-discovery $ad"
+    [ -n "$extra" ] && args+=" $extra"
+    install_agent_local "$dir" "$name" "$args"
+    return $?
+  fi
+
   install_args
   # shellcheck disable=SC2086
   sh "$KA_TMP" -e "$ep" "${auth[@]}" "${IARGS[@]}" \
@@ -1623,7 +1636,10 @@ adv_edit2() {
     0) multi_nics "包含网卡" "勾选要统计的网卡；全不选=全部" INCLUDE_NICS ;;
     1) multi_nics "排除网卡" "勾选要排除的网卡" EXCLUDE_NICS ;;
     2) multi_mounts ;;
-    3) edit_int "月重置日（1-31，0=关闭）" MONTH_ROTATE 0 31 ;;
+    3) edit_int "月重置日（1-31，0=关闭）" MONTH_ROTATE 0 31
+       if [ "$MONTH_ROTATE" != "0" ]; then
+         dim "开启后每个实例会额外记录月流量状态，多占一点内存和磁盘"
+       fi ;;
     4) edit_str "安装版本（如 1.2.13 / snapshot，空=latest）" INSTALL_VERSION ;;
     5) edit_str "GitHub 代理（如 https://ghproxy.net，空=直连）" GH_PROXY ;;
     6) edit_str "额外参数（原样传给 agent，空=无）" EXTRA_AGENT ;;
@@ -1648,7 +1664,10 @@ inst_edit2() {
     0) multi_nics "包含网卡" "勾选要统计的网卡；全不选=全部" INCLUDE_NICS ;;
     1) multi_nics "排除网卡" "勾选要排除的网卡" EXCLUDE_NICS ;;
     2) multi_mounts ;;
-    3) edit_int "月重置日（1-31，0=关闭）" MONTH_ROTATE 0 31 ;;
+    3) edit_int "月重置日（1-31，0=关闭）" MONTH_ROTATE 0 31
+       if [ "$MONTH_ROTATE" != "0" ]; then
+         dim "开启后每个实例会额外记录月流量状态，多占一点内存和磁盘"
+       fi ;;
     4) edit_str "额外参数（原样传给 agent，空=无）" EXTRA_AGENT ;;
     5) return 1 ;;
   esac
@@ -1800,9 +1819,18 @@ agent_arch() {
 }
 
 AGENT_CACHE="${KA_AGENT_CACHE:-/opt/ka/cache/komari-agent}"
+AGENT_IMPL="${KA_IMPL:-go}"
+AGENT_BIN=""
 AGENT_GOGC="${KA_AGENT_GOGC:-50}"
 AGENT_MEMLIMIT="${KA_AGENT_MEMLIMIT:-32MiB}"
 AGENT_GOMAXPROCS="${KA_AGENT_GOMAXPROCS:-1}"
+
+agent_cache_path() { # 实现 → 缓存文件
+  case "${1:-go}" in
+    zig) printf '%s-zig' "$AGENT_CACHE" ;;
+    *)   printf '%s' "$AGENT_CACHE" ;;
+  esac
+}
 
 tune_service_env() { # 服务名 类型：给服务注入 Go 运行时内存参数
   local svc="$1" kind="$2" f tmp
@@ -1840,15 +1868,18 @@ tune_service_env() { # 服务名 类型：给服务注入 Go 运行时内存参�
   return 0
 }
 
-prepare_agent_cache() {
-  local arch dir url path ver tmp
+prepare_agent_cache() { # [实现] [强制刷新]
+  local impl="${1:-$AGENT_IMPL}" force="${2:-0}"
+  local arch dir url path ver tmp cache
   arch="$(agent_arch)" || return 1
-  dir="$(dirname "$AGENT_CACHE")"
+  cache="$(agent_cache_path "$impl")"
+  dir="$(dirname "$cache")"
   mkdir -p "$dir" 2>/dev/null || return 1
 
   # 已有缓存且不超过 7 天，直接用
-  if [ -s "$AGENT_CACHE" ] && [ -z "${INSTALL_VERSION:-}" ]; then
-    if [ -z "$(find "$AGENT_CACHE" -mtime +7 2>/dev/null)" ]; then
+  if [ "$force" -eq 0 ] && [ -s "$cache" ] && [ -z "${INSTALL_VERSION:-}" ]; then
+    if [ -z "$(find "$cache" -mtime +7 2>/dev/null)" ]; then
+      AGENT_BIN="$cache"
       return 0
     fi
   fi
@@ -1859,21 +1890,25 @@ prepare_agent_cache() {
   else
     path="download/$ver"
   fi
-  url="https://github.com/komari-monitor/komari-agent/releases/$path/komari-agent-linux-$arch"
+  case "$impl" in
+    zig) url="https://github.com/luodaoyi/komari-zig-agent/releases/$path/komari-agent-linux-$arch" ;;
+    *)   url="https://github.com/komari-monitor/komari-agent/releases/$path/komari-agent-linux-$arch" ;;
+  esac
   if [ -n "${GH_PROXY:-}" ]; then url="$GH_PROXY/$url"; fi
 
-  tmp="$AGENT_CACHE.tmp.$$"
-  info "下载 Agent 二进制（只下一次，后续实例复用）"
+  tmp="$cache.tmp.$$"
+  info "下载 Agent 二进制（$impl，只下一次，后续复用）"
   if ! dl_to "$url" "$tmp" 300 || [ ! -s "$tmp" ]; then
     rm -f "$tmp"
     return 1
   fi
   chmod +x "$tmp" 2>/dev/null || true
-  if ! mv -f "$tmp" "$AGENT_CACHE"; then
+  if ! mv -f "$tmp" "$cache"; then
     rm -f "$tmp"
     return 1
   fi
-  chmod +x "$AGENT_CACHE" 2>/dev/null || true
+  chmod +x "$cache" 2>/dev/null || true
+  AGENT_BIN="$cache"
   return 0
 }
 
@@ -1895,7 +1930,8 @@ install_agent_local() { # 目录 服务名 参数串
   esac
 
   rm -f "$exe"
-  cp -f "$AGENT_CACHE" "$exe" || return 1
+  [ -n "$AGENT_BIN" ] || return 1
+  cp -f "$AGENT_BIN" "$exe" || return 1
   chmod +x "$exe" || return 1
 
   case "$INIT_SYS" in
@@ -1945,12 +1981,14 @@ do_install() {
   local tmp="" i token dir svc fails=0 fast=0 args_str
   local -a auth=()
 
-  if prepare_agent_cache; then
+  if prepare_agent_cache "$AGENT_IMPL"; then
     fast=1
-    ok "Agent 已缓存，${INSTANCE_COUNT} 个实例直接复制，不再重复下载"
+    ok "Agent 已缓存（$AGENT_IMPL），${INSTANCE_COUNT} 个实例直接复制，不再重复下载"
     if [ "$INSTANCE_COUNT" -gt 20 ]; then
       dim "提示：每个实例复制一份 Agent（约 11MB），共约 $((INSTANCE_COUNT * 11))MB 磁盘"
     fi
+  elif [ "$AGENT_IMPL" = "zig" ]; then
+    die "下载 Zig Agent 失败，检查网络或设置 GH_PROXY"
   else
     tmp="$(mktemp /tmp/ka-install.XXXXXX)" || die "无法创建临时文件"
     info "下载安装脚本…"
@@ -2175,6 +2213,21 @@ cmd_doctor() {
     fi
   done
   rule 60
+  local mrot=0 gpu_cnt=0 a
+  for ((i = 0; i < D_COUNT; i++)); do
+    a=" ${D_ARGS[$i]:-} "
+    printf '%s' "$a" | grep -Eq -- '--month-rotate[= ]+[1-9]' && mrot=$((mrot + 1))
+    printf '%s' "$a" | grep -Eq -- '--gpu([ =]|$)' && gpu_cnt=$((gpu_cnt + 1))
+  done
+  if [ "$mrot" -gt 0 ] || [ "$gpu_cnt" -gt 0 ]; then
+    blank
+    if [ "$mrot" -gt 0 ]; then
+      dim "$mrot 个实例开启了月流量重置（--month-rotate），会额外占用一点内存和磁盘"
+    fi
+    if [ "$gpu_cnt" -gt 0 ]; then
+      dim "$gpu_cnt 个实例开启了 GPU 监控（--gpu），没有显卡建议关掉"
+    fi
+  fi
   printf '  %s%d/%d 个实例在运行%s\n\n' "$GRAY" "$okc" "$D_COUNT" "$RESET"
 }
 
@@ -2509,6 +2562,29 @@ params_apply() { # 下标：把当前全局参数套用到该实例
   return 1
 }
 
+switch_impl_idx() { # 下标 目标实现
+  local idx="$1" impl="$2"
+  local n="${D_NAME[$idx]}" k="${D_KIND[$idx]}" dir="${D_DIR[$idx]}"
+  local raw="${D_ARGS[$idx]:-}" bak="${D_DIR[$idx]}/agent.ka-bak"
+  if [ -z "$raw" ]; then
+    warn "$n 解析不到启动参数，跳过"
+    return 1
+  fi
+  cp -f "$dir/agent" "$bak" 2>/dev/null || true
+  if install_agent_local "$dir" "$n" "$raw" && [ "$(svc_state "$n" "$k")" = "active" ]; then
+    rm -f "$bak"
+    ok "$n 已切换到 $impl"
+    return 0
+  fi
+  if [ -f "$bak" ]; then
+    cp -f "$bak" "$dir/agent" 2>/dev/null && chmod +x "$dir/agent" 2>/dev/null
+    rm -f "$bak"
+    svc_ctl restart "$n" "$k" >/dev/null 2>&1 || true
+  fi
+  warn "$n 切换失败，已回滚"
+  return 1
+}
+
 cmd_batch() {
   need_root
   load_conf
@@ -2524,7 +2600,7 @@ cmd_batch() {
     return 0
   fi
 
-  local -a actions=("重启服务" "停止服务" "启动服务" "──" "升级 Agent" "修改参数" "内存调优" "──" "卸载实例")
+  local -a actions=("重启服务" "停止服务" "启动服务" "──" "升级 Agent" "修改参数" "内存调优" "切换 Agent 实现" "──" "卸载实例")
   pick "批量操作" "共 ${#SVC[@]} 个服务实例" "${actions[@]}" || return 0
 
   local act
@@ -2535,7 +2611,8 @@ cmd_batch() {
     4) act="upgrade" ;;
     5) act="params" ;;
     6) act="memtune" ;;
-    8) act="remove" ;;
+    7) act="switch" ;;
+    9) act="remove" ;;
     *) return 0 ;;
   esac
   local act_cn
@@ -2546,8 +2623,17 @@ cmd_batch() {
     upgrade) act_cn="升级" ;;
     params)  act_cn="修改参数" ;;
     memtune) act_cn="内存调优" ;;
+    switch)  act_cn="切换实现" ;;
     *)       act_cn="卸载" ;;
   esac
+
+  local switch_impl=""
+  if [ "$act" = "switch" ]; then
+    local -a impls=("Zig · 常驻约 1.2MB（省内存）" "Go · 官方，约 18MB")
+    pick "切换实现" "选择目标 Agent 实现" "${impls[@]}" || return 0
+    if [ "$PICK_RESULT" -eq 0 ]; then switch_impl="zig"; else switch_impl="go"; fi
+    act_cn="切换到 $switch_impl"
+  fi
 
   local -a scope_items=("全部（${#SVC[@]} 个）" "手动勾选")
   pick "执行范围" "对哪些实例执行「${act_cn}」" "${scope_items[@]}" || return 0
@@ -2619,6 +2705,9 @@ cmd_batch() {
   if [ "$act" = "upgrade" ] || [ "$act" = "params" ]; then
     fetch_installer || die "下载安装脚本失败"
   fi
+  if [ "$act" = "switch" ]; then
+    prepare_agent_cache "$switch_impl" 1 || die "下载 $switch_impl 版本失败"
+  fi
 
   local okc=0
   for i in "${targets[@]}"; do
@@ -2642,11 +2731,17 @@ cmd_batch() {
         else
           warn "${D_NAME[$i]} 应用内存参数失败"
         fi ;;
+      switch)
+        if switch_impl_idx "$i" "$switch_impl"; then okc=$((okc + 1)); fi ;;
       remove)
         remove_index "$i" 1
         okc=$((okc + 1)) ;;
     esac
   done
+  if [ "$act" = "switch" ] && [ "$okc" -gt 0 ]; then
+    AGENT_IMPL="$switch_impl"
+    save_conf
+  fi
   blank
   printf '  %s%d/%d 成功%s\n\n' "$GRAY" "$okc" "${#targets[@]}" "$RESET"
 }

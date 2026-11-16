@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.0.23-d6336c?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-0.0.25-d6336c?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/platform-Linux-7048e8?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/init-systemd%20%7C%20OpenRC-1c7ed6?style=flat-square" alt="init">
   <img src="https://img.shields.io/badge/shell-bash%204%2B-0ca678?style=flat-square" alt="shell">
@@ -22,7 +22,7 @@
 ```
   K O M A R I   A G E N T
   ────────────────────────────────────────
-  ka v0.0.23  · 多实例部署 · NAT 友好
+  ka v0.0.25  · 多实例部署 · NAT 友好
 ```
 
 ## 功能特性
@@ -36,6 +36,7 @@
 | 🔑 | **两种认证** | 节点 Token，或自动发现密钥批量注册 |
 | 🛠 | **全生命周期** | 改参数、升级、接管、备注、卸载都有入口 |
 | 🩺 | **自检** | 服务状态、开机自启、面板连通一键检查 |
+| 🪶 | **轻量 Agent** | 可一键切换 Zig 版 Agent，常驻内存从 ~18MB 降到 ~1.2MB |
 | ⬆️ | **自更新** | `ka update` 拉取新版本，旧版本保留可回退 |
 
 ## 安装
@@ -72,7 +73,7 @@ ka
 
 ```
   ┃  主菜单
-     v0.0.23 · OpenRC · 已发现 1 个实例
+     v0.0.25 · OpenRC · 已发现 1 个实例
 
    ❯ 安装 / 新增实例
      实例管理
@@ -146,6 +147,16 @@ ka
 </ul>
 
 <code>ka status</code> 会显示所有 agent 进程的内存总和，方便对比调优前后。
+</details>
+
+<details>
+<summary><b>内存吃紧，能换成 Zig 版 Agent 吗？</b></summary>
+
+可以。社区项目 <a href="https://github.com/luodaoyi/komari-zig-agent">komari-zig-agent</a> 协议兼容，常驻内存约 1.2MB（官方 Go 版约 18MB）。<code>ka</code> 支持一键切换：
+
+<pre><code>ka   # 批量操作 → 切换 Agent 实现 → Zig</code></pre>
+
+切换保留原有面板地址、token 和参数，逐个替换并检查启动，失败自动回滚到原二进制。
 </details>
 
 <details>
