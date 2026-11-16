@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.0.25-d6336c?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-0.0.32-d6336c?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/platform-Linux-7048e8?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/init-systemd%20%7C%20OpenRC-1c7ed6?style=flat-square" alt="init">
   <img src="https://img.shields.io/badge/shell-bash%204%2B-0ca678?style=flat-square" alt="shell">
@@ -22,7 +22,7 @@
 ```
   K O M A R I   A G E N T
   ────────────────────────────────────────
-  ka v0.0.25  · 多实例部署 · NAT 友好
+  ka v0.0.32  · 多实例部署 · NAT 友好
 ```
 
 ## 功能特性
@@ -72,13 +72,19 @@ ka
 打开菜单：
 
 ```
+  K O M A R I   A G E N T
+  ────────────────────────────────────────
+  ● CPU 8% ░░░░░  ● 内存 43% ██░░░  ● 磁盘 21% █░░░░  ● 负载 0.12
+
   ┃  主菜单
-     v0.0.25 · OpenRC · 已发现 1 个实例
+     v0.0.32 · OpenRC · 已发现 1 个实例
 
    ❯ 安装 / 新增实例
      实例管理
      批量操作
      自检
+     修改主机名
+     清理日志
      卸载 / 清理
      检查更新
      退出
@@ -86,13 +92,14 @@ ka
    ↑↓ 移动 · Enter 选择 · q 退出
 ```
 
-安装向导共 5 步：
+安装向导共 6 步：
 
-1. **面板地址** — 已有实例时自动沿用，回车即可
-2. **认证方式** — 节点 Token / 自动发现密钥
-3. **节点 Token** — 粘贴 token，一行一个，空行结束
-4. **高级参数** — 采集间隔、开关、网卡、挂载点
-5. **确认部署** — 回车开始，`b` 返回改参数，`q` 取消
+1. **Agent 实现** — Go / Zig，默认沿用上次的选择
+2. **面板地址** — 已有实例时自动沿用，回车即可
+3. **认证方式** — 节点 Token / 自动发现密钥
+4. **节点 Token** — 粘贴 token，一行一个，空行结束
+5. **高级参数** — 采集间隔、开关、网卡、挂载点
+6. **确认部署** — 回车开始，`b` 返回改参数，`q` 取消
 
 不喜欢菜单也可以直接敲命令：
 
@@ -102,6 +109,7 @@ ka
 | `ka doctor` | 一键自检 |
 | `ka logs komari-agent-1` | 查看指定实例日志 |
 | `ka logs clean` | 清理日志，可开每日自动清理 |
+| `ka hostname <名字>` | 修改本机主机名 |
 | `ka batch` | 批量重启 / 停止 / 启动 / 升级 / 卸载 |
 | `ka adopt` | 接管外部实例 |
 | `ka upgrade` | 原地升级 Agent |

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.25        归档文件: ka-v<版本>.sh
+#  版本: 0.0.32        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.25"
+KA_VERSION="0.0.32"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -37,7 +37,7 @@ UTF8=0
 B=""; DIM=""; RESET=""
 PINK=""; PURP=""; BLUE=""; CYAN=""; GREEN=""; YELL=""; RED=""; GRAY=""; WHITE=""
 G_OK="OK"; G_ERR="x"; G_WARN="!"; G_INFO="*"
-G_DOT="o"; G_DOT_OFF="."; G_DOT_CUR="O"; G_BAR="|"; G_ARROW=">"; G_RULE="-"
+G_DOT="o"; G_DOT_OFF="."; G_DOT_CUR="O"; G_BAR="|"; G_ARROW=">"; G_RULE="-"; G_FULL="#"; G_EMPTY="-"
 
 detect_color() {
   COLOR_DEPTH=0
@@ -71,7 +71,7 @@ ui_init() {
     B=""; DIM=""; RESET=""
     PINK=""; PURP=""; BLUE=""; CYAN=""; GREEN=""; YELL=""; RED=""; GRAY=""; WHITE=""
     G_OK="[OK]"; G_ERR="[!!]"; G_WARN="[!]"; G_INFO="->"
-    G_DOT="o"; G_DOT_OFF="."; G_DOT_CUR="O"; G_BAR="|"; G_ARROW=">"; G_RULE="-"
+    G_DOT="o"; G_DOT_OFF="."; G_DOT_CUR="O"; G_BAR="|"; G_ARROW=">"; G_RULE="-"; G_FULL="#"; G_EMPTY="-"
     return 0
   fi
 
@@ -95,7 +95,7 @@ ui_init() {
   if [ "$UTF8" -eq 1 ]; then
     G_OK="✔"; G_ERR="✘"; G_WARN="▲"; G_INFO="◆"
     G_DOT="●"; G_DOT_OFF="○"; G_DOT_CUR="◉"
-    G_BAR="┃"; G_ARROW="▸"; G_RULE="─"
+    G_BAR="┃"; G_ARROW="▸"; G_RULE="─"; G_FULL="█"; G_EMPTY="░"
   fi
 }
 ui_init
@@ -252,10 +252,112 @@ read_key() {
   esac
 }
 
+CPU_PT=""
+CPU_PI=""
+SYS_TS=0
+MEMPCT=""
+DISKPCT=""
+
+mem_used_pct() {
+  local key val total="" avail="" free="" buf="" cached=""
+  while read -r key val _; do
+    case "$key" in
+      MemTotal:)     total="$val" ;;
+      MemAvailable:) avail="$val" ;;
+      MemFree:)      free="$val" ;;
+      Buffers:)      buf="$val" ;;
+      Cached:)       cached="$val" ;;
+    esac
+  done < /proc/meminfo 2>/dev/null
+  if [ -z "$total" ] || [ "${total:-0}" -le 0 ]; then return 0; fi
+  if [ -z "$avail" ]; then
+    avail=$(( ${free:-0} + ${buf:-0} + ${cached:-0} ))
+  fi
+  printf '%s' $(((total - avail) * 100 / total))
+}
+
+disk_used_pct() {
+  local line total used
+  line="$(df -k "${BASE_DIR:-/}" 2>/dev/null | tail -n 1)"
+  [ -n "$line" ] || return 0
+  set -- $line
+  total="${2:-0}"
+  used="${3:-0}"
+  if [ "$total" -gt 0 ]; then
+    printf '%s' $((used * 100 / total))
+  fi
+}
+
+refresh_sys() {
+  local now=$SECONDS
+  if [ "$SYS_TS" -ne 0 ] && [ $((now - SYS_TS)) -lt 3 ]; then return 0; fi
+  SYS_TS=$now
+  MEMPCT="$(mem_used_pct)"
+  DISKPCT="$(disk_used_pct)"
+}
+
+cpu_pct() {
+  local t i pt pi dt di
+  read -r t i <<< "$(awk '/^cpu /{print ($2+$3+$4+$5+$6+$7+$8), ($5+$6)}' /proc/stat 2>/dev/null)"
+  [ -n "${t:-}" ] || return 0
+  if [ -z "$CPU_PT" ]; then
+    CPU_PT="$t"
+    CPU_PI="$i"
+    sleep 0.2
+    read -r t i <<< "$(awk '/^cpu /{print ($2+$3+$4+$5+$6+$7+$8), ($5+$6)}' /proc/stat 2>/dev/null)"
+  fi
+  pt="$CPU_PT"
+  pi="$CPU_PI"
+  CPU_PT="$t"
+  CPU_PI="$i"
+  dt=$((t - pt))
+  di=$((i - pi))
+  if [ "$dt" -le 0 ]; then return 0; fi
+  printf '%s' $(((dt - di) * 100 / dt))
+}
+
+metric_seg() {
+  local label="$1" pct="$2" col bar i filled
+  if [ -z "$pct" ]; then
+    printf '%s●%s %s --' "$GRAY" "$RESET" "$label"
+    return 0
+  fi
+  if [ "$pct" -ge 85 ]; then
+    col="$RED"
+  elif [ "$pct" -ge 60 ]; then
+    col="$YELL"
+  else
+    col="$GREEN"
+  fi
+  filled=$((pct / 20))
+  for ((i = 0; i < 5; i++)); do
+    if [ "$i" -lt "$filled" ]; then
+      bar+="${col}${G_FULL}"
+    else
+      bar+="${GRAY}${G_EMPTY}"
+    fi
+  done
+  printf '%s●%s %s %s%% %s%s' "$col" "$RESET" "$label" "$pct" "$bar" "$RESET"
+}
+
+sys_line() {
+  refresh_sys
+  local cpu load
+  cpu="$(cpu_pct)"
+  load="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
+  printf '%s  %s  %s  %s●%s 负载 %s' \
+    "$(metric_seg "CPU" "$cpu")" \
+    "$(metric_seg "内存" "$MEMPCT")" \
+    "$(metric_seg "磁盘" "$DISKPCT")" \
+    "$GRAY" "$RESET" "${load:-—}"
+}
+
 draw_header() {
   local title="$1" sub="${2:-}" line
   printf '  %s\n' "$(rainbow 'K O M A R I   A G E N T')"
   printf '  %s%s%s\n' "$GRAY" "$(repeat "$G_RULE" 40)" "$RESET"
+  printf '  %s\n' "$(sys_line)"
+  printf '\n'
   printf '  %s%s%s  %s%s%s\n' "$PINK" "$G_BAR" "$RESET" "$B" "$title" "$RESET"
   if [ -n "$sub" ]; then
     printf '\n'
@@ -1321,7 +1423,7 @@ remove_index() { # 下标 [force]
 
 # ==================================================================== 向导 ===
 step_endpoint() {
-  step_header 1 5 "面板地址"
+  step_header 2 6 "面板地址"
   dim "填 Komari 面板地址，脚本会顺手探一下连通性"
   local v code
   while :; do
@@ -1339,6 +1441,25 @@ step_endpoint() {
   else
     ok "面板可达（HTTP $code）"
   fi
+  return 0
+}
+
+step_impl() {
+  step_header 1 6 "Agent 实现"
+  dim "Go 是官方实现最稳；Zig 更省内存，多实例更划算"
+  blank
+  local -a impls=(
+    "Go · 官方版本，稳定，常驻约 18MB"
+    "Zig · 轻量省内存，常驻约 1.2MB（多实例推荐）"
+  )
+  if [ "$AGENT_IMPL" = "zig" ]; then PICK_START=1; else PICK_START=0; fi
+  pick "Agent 实现" "第 1/6 步 · 之后也能在高级参数里改" "${impls[@]}" || return 1
+  if [ "$PICK_RESULT" -eq 1 ]; then
+    AGENT_IMPL="zig"
+  else
+    AGENT_IMPL="go"
+  fi
+  return 0
 }
 
 token_exists() {
@@ -1351,13 +1472,13 @@ token_exists() {
 }
 
 step_auth() {
-  step_header 2 5 "认证方式"
+  step_header 3 6 "认证方式"
   dim "Token：在面板里逐个添加节点，一个节点一个 token"
   dim "自动发现：一个密钥批量注册，节点自动出现在面板"
   blank
   local -a items=("节点 Token · 逐个添加（推荐）" "自动发现 · 一个密钥批量注册")
   PICK_HINT="↑↓ 移动 · Enter 选择 · q 取消向导"
-  pick "认证方式" "选择后进入下一步" "${items[@]}" || return 1
+  pick "认证方式" "第 3/6 步 · 选择后进入下一步" "${items[@]}" || return 1
   if [ "$PICK_RESULT" -eq 1 ]; then
     AUTH_MODE="ad"
   else
@@ -1439,7 +1560,7 @@ step_ad() {
 }
 
 step_tokens() {
-  step_header 3 5 "节点 Token"
+  step_header 4 6 "节点 Token"
   if [ "$AUTH_MODE" = "ad" ]; then
     step_ad
     return $?
@@ -1573,7 +1694,7 @@ adv_run() { # 标题 副标题 绘制函数 编辑函数 项数
 
 ADV_MORE_DRAW="adv_draw2"
 ADV_MORE_EDIT="adv_edit2"
-ADV_MORE_N=8
+ADV_MORE_N=9
 
 adv_draw1() {
   local s="$1"
@@ -1606,7 +1727,12 @@ adv_edit1() {
 }
 
 adv_draw2() {
-  local s="$1"
+  local s="$1" impl_txt
+  if [ "$AGENT_IMPL" = "zig" ]; then
+    impl_txt="${GREEN}Zig${RESET}（约 1.2MB）"
+  else
+    impl_txt="${YELL}Go${RESET}（官方，约 18MB）"
+  fi
   cfg_row 0 "$s" "包含网卡"     "${WHITE}${INCLUDE_NICS:-全部}${RESET}"
   cfg_row 1 "$s" "排除网卡"     "${WHITE}${EXCLUDE_NICS:-无}${RESET}"
   cfg_row 2 "$s" "包含挂载点"   "${WHITE}${MOUNT_POINTS:-全部}${RESET}"
@@ -1614,7 +1740,8 @@ adv_draw2() {
   cfg_row 4 "$s" "安装版本"     "${WHITE}${INSTALL_VERSION:-latest}${RESET}"
   cfg_row 5 "$s" "GitHub 代理"  "${WHITE}${GH_PROXY:-直连}${RESET}"
   cfg_row 6 "$s" "额外参数"     "${WHITE}${EXTRA_AGENT:-无}${RESET}"
-  cfg_row 7 "$s" "返回"         "${GREEN}←${RESET}"
+  cfg_row 7 "$s" "Agent 实现"   "$impl_txt"
+  cfg_row 8 "$s" "返回"         "${GREEN}←${RESET}"
 }
 
 multi_nics() {
@@ -1643,7 +1770,8 @@ adv_edit2() {
     4) edit_str "安装版本（如 1.2.13 / snapshot，空=latest）" INSTALL_VERSION ;;
     5) edit_str "GitHub 代理（如 https://ghproxy.net，空=直连）" GH_PROXY ;;
     6) edit_str "额外参数（原样传给 agent，空=无）" EXTRA_AGENT ;;
-    7) return 1 ;;
+    7) if [ "$AGENT_IMPL" = "zig" ]; then AGENT_IMPL="go"; else AGENT_IMPL="zig"; fi ;;
+    8) return 1 ;;
   esac
   return 0
 }
@@ -1675,7 +1803,7 @@ inst_edit2() {
 }
 
 step_advanced() {
-  step_header 4 5 "高级参数"
+  step_header 5 6 "高级参数"
   if [ "$UI_TUI" -eq 0 ]; then
     step_advanced_plain
     return 0
@@ -1742,7 +1870,7 @@ service_name_taken() {
 
 step_confirm() {
   build_args
-  step_header 5 5 "确认部署"
+  step_header 6 6 "确认部署"
 
   local clash="" i svc label auth_txt
   for ((i = 1; i <= INSTANCE_COUNT; i++)); do
@@ -1758,6 +1886,7 @@ step_confirm() {
 
   panel_row "面板地址" "$ENDPOINT"
   panel_row "认证方式" "$auth_txt"
+  panel_row "Agent 实现" "$AGENT_IMPL"
   if [ "$BATCH_NIC" -eq 1 ]; then
     panel_row "网卡分配" "每实例一块（共 ${INSTANCE_COUNT} 块）"
   fi
@@ -1786,7 +1915,11 @@ step_confirm() {
       "$GRAY" "$(inst_dir "$i")" "$RESET"
   done
   blank
-  dim "参数: ${ARGS[*]}"
+  if [ "$BATCH_NIC" -eq 1 ]; then
+    dim "通用参数: ${ARGS[*]} --include-nics <每实例不同>"
+  else
+    dim "参数: ${ARGS[*]}"
+  fi
   blank
 
   local go
@@ -1985,7 +2118,11 @@ do_install() {
     fast=1
     ok "Agent 已缓存（$AGENT_IMPL），${INSTANCE_COUNT} 个实例直接复制，不再重复下载"
     if [ "$INSTANCE_COUNT" -gt 20 ]; then
-      dim "提示：每个实例复制一份 Agent（约 11MB），共约 $((INSTANCE_COUNT * 11))MB 磁盘"
+      if [ "$AGENT_IMPL" = "zig" ]; then
+        dim "提示：每个实例复制一份 Agent（约 1MB），共约 $((INSTANCE_COUNT))MB 磁盘"
+      else
+        dim "提示：每个实例复制一份 Agent（约 11MB），共约 $((INSTANCE_COUNT * 11))MB 磁盘"
+      fi
     fi
   elif [ "$AGENT_IMPL" = "zig" ]; then
     die "下载 Zig Agent 失败，检查网络或设置 GH_PROXY"
@@ -2117,7 +2254,8 @@ cmd_wizard() {
     esac
   fi
 
-  step_endpoint
+  step_impl || return 0
+  step_endpoint || return 0
   step_auth || return 0
   step_tokens || return 0
   while :; do
@@ -2446,7 +2584,7 @@ cmd_edit_params() {
   fi
   ADV_MORE_DRAW="adv_draw2"
   ADV_MORE_EDIT="adv_edit2"
-  ADV_MORE_N=8
+  ADV_MORE_N=9
 
   build_args
   blank
@@ -2478,12 +2616,63 @@ cmd_edit_params() {
   fi
 }
 
+cache_total_kb() {
+  local f total=0 sz
+  for f in "$AGENT_CACHE" "$AGENT_CACHE-zig"; do
+    [ -f "$f" ] || continue
+    sz="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+    total=$((total + ${sz:-0}))
+  done
+  printf '%s' "$total"
+}
+
+cmd_cache_clean() {
+  need_root
+  local -a files=()
+  local f sz total=0
+  for f in "$AGENT_CACHE" "$AGENT_CACHE-zig" /tmp/ka-install.* /tmp/ka-update.*; do
+    [ -f "$f" ] || continue
+    files+=("$f")
+    sz="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+    total=$((total + ${sz:-0}))
+  done
+  if [ "${#files[@]}" -eq 0 ]; then
+    ok "没有需要清理的下载文件"
+    return 0
+  fi
+
+  printf '\n  %s%s%s %s下载文件%s\n' "$PURP" "$G_BAR" "$RESET" "$B" "$RESET"
+  rule 56
+  for f in "${files[@]}"; do
+    sz="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+    printf '  %s  %s%s%s\n' "$(human_size "${sz:-0}")" "$GRAY" "$f" "$RESET"
+  done
+  rule 56
+  blank
+  warn "共 $(human_size "$total")，删除后下次安装会重新下载"
+  local go
+  ask "确认清理? (y/N)" "N" go
+  case "$go" in [Yy]*) ;; *) warn "已取消"; return 0 ;; esac
+  for f in "${files[@]}"; do rm -f "$f" 2>/dev/null; done
+  ok "已清理下载文件"
+}
+
 cmd_cleanup() {
-  local -a items=("卸载实例 · 停服务并删除目录" "卸载 ka 自身 · 保留实例" "返回")
-  pick "卸载 / 清理" "两件事不一样，别选错" "${items[@]}" || return 0
+  local ck ct
+  ck="$(cache_total_kb)"
+  ct="无"
+  if [ "${ck:-0}" -gt 0 ]; then ct="$(human_size "$ck")"; fi
+  local -a items=(
+    "卸载实例 · 逐个选择，默认只删一个"
+    "清理下载缓存 · 当前 ${ct}"
+    "卸载 ka 自身 · 保留实例"
+    "返回"
+  )
+  pick "卸载 / 清理" "四件事不一样，别选错" "${items[@]}" || return 0
   case "$PICK_RESULT" in
     0) cmd_uninstall ;;
-    1) cmd_self_uninstall ;;
+    1) cmd_cache_clean ;;
+    2) cmd_self_uninstall ;;
   esac
 }
 
@@ -2499,6 +2688,8 @@ cmd_self_uninstall() {
   rm -f /usr/local/bin/ka 2>/dev/null
   rm -f "$KA_CONF" 2>/dev/null
   rm -f "$META_FILE" 2>/dev/null
+  rm -f "$AGENT_CACHE" "$AGENT_CACHE-zig" 2>/dev/null
+  rm -f /tmp/ka-install.* /tmp/ka-update.* 2>/dev/null
   case "$KA_DIR" in
     /opt/ka|/opt/ka/*) rm -rf "$KA_DIR" ;;
     *)
@@ -2686,7 +2877,7 @@ cmd_batch() {
     fi
     ADV_MORE_DRAW="adv_draw2"
     ADV_MORE_EDIT="adv_edit2"
-    ADV_MORE_N=8
+    ADV_MORE_N=9
   fi
 
   blank
@@ -3087,17 +3278,17 @@ cmd_uninstall() {
   for ((i = 0; i < D_COUNT; i++)); do
     items+=("${D_NAME[$i]}  [${D_TAG[$i]}]")
   done
-  items+=("全部卸载")
-  pick "卸载实例" "选择要删除的实例" "${items[@]}" || return 0
+  items+=("${RED}全部卸载（${D_COUNT} 个）${RESET}")
+  pick "卸载实例" "逐个选择，默认只删选中的那个；全部删除在最后" "${items[@]}" || return 0
 
   if [ "$PICK_RESULT" -eq "$D_COUNT" ]; then
     local go
     warn "将删除全部 ${D_COUNT} 个实例（服务 + 安装目录）"
-    ask "确认? (y/N)" "N" go
-    case "$go" in
-      [Yy]*) ;;
-      *) warn "已取消"; return 0 ;;
-    esac
+    ask "输入 yes 确认全部删除（直接回车取消）" "" go
+    if [ "$go" != "yes" ]; then
+      warn "已取消"
+      return 0
+    fi
     for ((i = 0; i < D_COUNT; i++)); do
       remove_index "$i" 1
     done
@@ -3346,6 +3537,7 @@ cmd_help() {
     ka upgrade [all|名字]  原地升级 Agent（沿用现有参数）
     ka batch              批量重启 / 停止 / 启动
     ka note [名字] [备注]  设置实例备注（地区/用途）
+    ka hostname [名字]    修改本机主机名
     ka logs <n|name|all>  查看日志，默认 80 行
     ka logs clean         清理 agent 日志（可开每日自动清理）
 
@@ -3368,6 +3560,56 @@ EOF
 }
 
 # ==================================================================== 菜单 ===
+valid_hostname() {
+  local h="$1"
+  [ -n "$h" ] || return 1
+  [ "${#h}" -le 63 ] || return 1
+  case "$h" in
+    *[!A-Za-z0-9.-]*) return 1 ;;
+    -*|.*|*-|*.) return 1 ;;
+  esac
+  return 0
+}
+
+cmd_hostname() {
+  need_root
+  local cur new go
+  cur="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null)"
+  printf '\n  %s%s%s %s主机名%s\n' "$PURP" "$G_BAR" "$RESET" "$B" "$RESET"
+  panel_row "当前" "${cur:-未知}"
+  blank
+
+  if [ $# -ge 1 ] && [ -n "$1" ]; then
+    new="$1"
+  else
+    ask "新主机名（留空取消）" "" new
+  fi
+  [ -z "$new" ] && { warn "已取消"; return 0; }
+  if ! valid_hostname "$new"; then
+    warn "主机名不合法：只能含字母、数字、点、连字符，长度 1-63，不能以 . 或 - 开头结尾"
+    return 1
+  fi
+  ask "确认把主机名改为 $new? (y/N)" "N" go
+  case "$go" in [Yy]*) ;; *) warn "已取消"; return 0 ;; esac
+
+  detect_init >/dev/null
+  local applied=0
+  if [ "$INIT_SYS" = "systemd" ] && command -v hostnamectl >/dev/null 2>&1; then
+    if hostnamectl set-hostname "$new" >/dev/null 2>&1; then applied=1; fi
+  fi
+  if [ "$applied" -eq 0 ]; then
+    printf '%s\n' "$new" > /etc/hostname 2>/dev/null || {
+      warn "写入 /etc/hostname 失败"
+      return 1
+    }
+    if command -v hostname >/dev/null 2>&1; then
+      hostname "$new" >/dev/null 2>&1 || true
+    fi
+  fi
+  ok "主机名已改为 $new"
+  dim "当前 SSH 会话的提示符要重新登录才变；有服务依赖旧主机名的话请重启对应服务"
+}
+
 cmd_menu() {
   [ -t 0 ] || die "菜单需要交互式终端；可用 ka install / ka status 等子命令"
   tui_init
@@ -3387,7 +3629,7 @@ cmd_menu() {
     else
       sub="v$KA_VERSION · $(init_label "$INIT_SYS") · 已发现 ${D_COUNT} 个实例"
     fi
-    items=("安装 / 新增实例" "实例管理" "批量操作" "自检" "清理日志" "卸载 / 清理" "检查更新" "退出")
+    items=("安装 / 新增实例" "实例管理" "批量操作" "自检" "修改主机名" "清理日志" "卸载 / 清理" "检查更新" "退出")
     PICK_HINT="↑↓ 移动 · Enter 选择 · q 退出"
     pick "主菜单" "$sub" "${items[@]}" || return 0
     case "$PICK_RESULT" in
@@ -3395,10 +3637,11 @@ cmd_menu() {
       1) cmd_instances; pause_any ;;
       2) cmd_batch; pause_any ;;
       3) cmd_doctor; pause_any ;;
-      4) cmd_logs clean; pause_any ;;
-      5) cmd_cleanup; pause_any ;;
-      6) cmd_update; pause_any ;;
-      7) return 0 ;;
+      4) cmd_hostname; pause_any ;;
+      5) cmd_logs clean; pause_any ;;
+      6) cmd_cleanup; pause_any ;;
+      7) cmd_update; pause_any ;;
+      8) return 0 ;;
     esac
   done
 }
@@ -3421,6 +3664,7 @@ main() {
     cleanup)              cmd_cleanup ;;
     self-uninstall)       cmd_self_uninstall ;;
     version|-v|--version) cmd_version ;;
+    hostname)             cmd_hostname "$@" ;;
     update)               cmd_update "$@" ;;
     bump)                 cmd_bump ;;
     self-install)         cmd_self_install "$@" ;;
