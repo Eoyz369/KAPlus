@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.49        归档文件: ka-v<版本>.sh
+#  版本: 0.0.51        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.49"
+KA_VERSION="0.0.51"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -2246,8 +2246,18 @@ do_install() {
       return 1
     fi
     memavail="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)"
-    if [ -n "$memavail" ] && [ $((INSTANCE_COUNT * 15000)) -gt "$memavail" ]; then
-      warn "内存可能不够：${INSTANCE_COUNT} 个实例预计 ≥$((INSTANCE_COUNT * 15))MB，当前可用 $((memavail / 1024))MB"
+    local per_mb
+    case "$AGENT_IMPL" in
+      zig) per_mb=2 ;;
+      *)   per_mb=18 ;;
+    esac
+    if [ -n "$memavail" ] && [ $((INSTANCE_COUNT * per_mb * 1024)) -gt "$memavail" ]; then
+      local need_mb=$((INSTANCE_COUNT * per_mb))
+      warn "内存偏紧：${INSTANCE_COUNT} 个实例按 ${per_mb}MB/个 预留，需要约 ${need_mb}MB，当前可用 $((memavail / 1024))MB"
+      if [ "$AGENT_IMPL" = "zig" ]; then
+        dim "Zig 实测常驻约 1.2MB/个（251 个约 300MB），预留 2MB 是给上报峰值留余量"
+        dim "继续装一般没问题；若被 OOM 杀掉，减少实例数即可"
+      fi
       ask "仍然继续? (y/N)" "N" continue_go
       case "$continue_go" in [Yy]*) ;; *) warn "已取消"; return 0 ;; esac
     fi
