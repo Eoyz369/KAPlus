@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.36        归档文件: ka-v<版本>.sh
+#  版本: 0.0.38        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.36"
+KA_VERSION="0.0.38"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -257,6 +257,7 @@ CPU_PI=""
 SYS_TS=0
 MEMPCT=""
 DISKPCT=""
+CPUPCT=""
 MEM_TOTAL_KB=0
 MEM_USED_KB=0
 DISK_TOTAL_KB=0
@@ -273,8 +274,11 @@ human_kb() {
   fi
 }
 
-mem_used_pct() {
+mem_stats() {
   local key val total="" avail="" free="" buf="" cached=""
+  MEMPCT=""
+  MEM_TOTAL_KB=0
+  MEM_USED_KB=0
   while read -r key val _; do
     case "$key" in
       MemTotal:)     total="$val" ;;
@@ -285,17 +289,20 @@ mem_used_pct() {
     esac
   done < /proc/meminfo 2>/dev/null
   MEM_TOTAL_KB="${total:-0}"
-  if [ "$MEM_TOTAL_KB" -le 0 ]; then return 0; fi
+  [ "$MEM_TOTAL_KB" -gt 0 ] || return 0
   if [ -z "$avail" ]; then
     avail=$(( ${free:-0} + ${buf:-0} + ${cached:-0} ))
   fi
   MEM_USED_KB=$((MEM_TOTAL_KB - avail))
   if [ "$MEM_USED_KB" -lt 0 ]; then MEM_USED_KB=0; fi
-  printf '%s' $((MEM_USED_KB * 100 / MEM_TOTAL_KB))
+  MEMPCT=$((MEM_USED_KB * 100 / MEM_TOTAL_KB))
 }
 
-disk_used_pct() {
+disk_stats() {
   local line total used cap i n pct
+  DISKPCT=""
+  DISK_TOTAL_KB=0
+  DISK_USED_KB=0
   line="$(df -k "${BASE_DIR:-/}" 2>/dev/null | tail -n 1)"
   [ -n "$line" ] || return 0
   local -a f=()
@@ -318,19 +325,20 @@ disk_used_pct() {
   DISK_USED_KB="$used"
   pct=$((used * 100 / total))
   [ "$pct" -gt 100 ] && pct=100
-  printf '%s' "$pct"
+  DISKPCT="$pct"
 }
 
 refresh_sys() {
   local now=$SECONDS
   if [ "$SYS_TS" -ne 0 ] && [ $((now - SYS_TS)) -lt 3 ]; then return 0; fi
   SYS_TS=$now
-  MEMPCT="$(mem_used_pct)"
-  DISKPCT="$(disk_used_pct)"
+  mem_stats
+  disk_stats
 }
 
-cpu_pct() {
+cpu_stats() {
   local t i pt pi dt di
+  CPUPCT=""
   read -r t i <<< "$(awk '/^cpu /{print ($2+$3+$4+$5+$6+$7+$8), ($5+$6)}' /proc/stat 2>/dev/null)"
   [ -n "${t:-}" ] || return 0
   if [ -z "$CPU_PT" ]; then
@@ -346,7 +354,7 @@ cpu_pct() {
   dt=$((t - pt))
   di=$((i - pi))
   if [ "$dt" -le 0 ]; then return 0; fi
-  printf '%s' $(((dt - di) * 100 / dt))
+  CPUPCT=$(((dt - di) * 100 / dt))
 }
 
 metric_seg() {
@@ -377,8 +385,8 @@ metric_seg() {
 
 sys_line() {
   refresh_sys
-  local cpu load memd="" diskd=""
-  cpu="$(cpu_pct)"
+  cpu_stats
+  local load memd="" diskd=""
   load="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
   if [ "${MEM_TOTAL_KB:-0}" -gt 0 ]; then
     memd="$(human_kb "$MEM_USED_KB")/$(human_kb "$MEM_TOTAL_KB")"
@@ -387,7 +395,7 @@ sys_line() {
     diskd="$(human_kb "$DISK_USED_KB")/$(human_kb "$DISK_TOTAL_KB")"
   fi
   printf '  %s  %s\n' \
-    "$(metric_seg "CPU" "$cpu")" \
+    "$(metric_seg "CPU" "$CPUPCT")" \
     "$(metric_seg "内存" "$MEMPCT" "$memd")"
   printf '  %s  %s●%s 负载 %s' \
     "$(metric_seg "磁盘" "$DISKPCT" "$diskd")" \
@@ -3340,18 +3348,36 @@ cmd_uninstall() {
 }
 
 # ================================================================ 版本维护 ===
-ka_find_latest() {
-  local files latest
-  files="$(ls -1 "$KA_DIR"/ka-v[0-9]*.sh 2>/dev/null || true)"
-  [ -z "$files" ] && return 0
-  latest="$(printf '%s\n' "$files" | sort -V 2>/dev/null | tail -n 1)"
-  [ -z "$latest" ] && latest="$(printf '%s\n' "$files" | sort | tail -n 1)"
-  printf '%s' "$latest" | sed 's#.*/ka-v##; s#\.sh$##'
+ver_gt() { # $1 > $2 ?（纯数字比较，不依赖 sort -V）
+  local a="$1" b="$2" i x y
+  [ "$a" = "$b" ] && return 1
+  local -a A=() B=()
+  IFS=. read -r -a A <<< "$a"
+  IFS=. read -r -a B <<< "$b"
+  for ((i = 0; i < 3; i++)); do
+    x="${A[$i]:-0}"
+    y="${B[$i]:-0}"
+    case "$x" in ''|*[!0-9]*) x=0 ;; esac
+    case "$y" in ''|*[!0-9]*) y=0 ;; esac
+    if [ "$x" -gt "$y" ]; then return 0; fi
+    if [ "$x" -lt "$y" ]; then return 1; fi
+  done
+  return 1
 }
 
-ver_gt() { # $1 > $2 ?
-  [ "$1" = "$2" ] && return 1
-  [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V 2>/dev/null | tail -n 1)" = "$1" ]
+ka_find_latest() {
+  local files f v latest=""
+  files="$(ls -1 "$KA_DIR"/ka-v[0-9]*.sh 2>/dev/null || true)"
+  [ -z "$files" ] && return 0
+  for f in $files; do
+    v="$(basename "$f")"
+    v="${v#ka-v}"
+    v="${v%.sh}"
+    if [ -z "$latest" ] || ver_gt "$v" "$latest"; then
+      latest="$v"
+    fi
+  done
+  printf '%s' "$latest"
 }
 
 cmd_update() {
@@ -3424,6 +3450,7 @@ cmd_update() {
     if [ -f "$KA_DIR/ka.sh" ]; then
       cp -f "$tmp" "$KA_DIR/ka.sh" && chmod +x "$KA_DIR/ka.sh"
     fi
+    write_launcher "$KA_DIR"
     new_exec="$dst"
   else
     # 手动拷贝的单个脚本：原子替换，避免执行到一半被截断
@@ -3508,6 +3535,55 @@ cmd_bump() {
   dim "直接运行 ka 即可使用新版本"
 }
 
+write_launcher() { # 目录：生成/刷新 ka 启动器
+  local dir="$1"
+  cat > "$dir/ka" <<'KA_LAUNCHER'
+#!/usr/bin/env bash
+# ka 启动器：始终执行同目录下版本号最大的 ka-v*.sh
+set -u
+self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+dir="$(dirname "$self")"
+best=""
+bestv=""
+for f in "$dir"/ka-v[0-9]*.sh; do
+  [ -e "$f" ] || continue
+  v="${f##*/}"
+  v="${v#ka-v}"
+  v="${v%.sh}"
+  if [ -z "$best" ]; then
+    best="$f"
+    bestv="$v"
+    continue
+  fi
+  IFS=. read -r -a A <<< "$v"
+  IFS=. read -r -a B <<< "$bestv"
+  bigger=0
+  for i in 0 1 2; do
+    x="${A[$i]:-0}"
+    y="${B[$i]:-0}"
+    case "$x" in ''|*[!0-9]*) x=0 ;; esac
+    case "$y" in ''|*[!0-9]*) y=0 ;; esac
+    if [ "$x" -gt "$y" ]; then bigger=1; break; fi
+    if [ "$x" -lt "$y" ]; then bigger=-1; break; fi
+  done
+  if [ "$bigger" -eq 1 ]; then
+    best="$f"
+    bestv="$v"
+  fi
+done
+if [ -z "$best" ]; then
+  if [ -f "$dir/ka.sh" ]; then
+    best="$dir/ka.sh"
+  else
+    echo "ka: 找不到 ka-v*.sh 或 ka.sh" >&2
+    exit 1
+  fi
+fi
+exec bash "$best" "$@"
+KA_LAUNCHER
+  chmod +x "$dir/ka"
+}
+
 cmd_self_install() {
   need_root
   local target="${1:-/opt/ka}"
@@ -3541,30 +3617,7 @@ cmd_self_install() {
     cp -f "$f" "$target"/ 2>/dev/null || true
   done
 
-  if [ ! -f "$target/ka" ]; then
-    cat > "$target/ka" <<'KA_LAUNCHER'
-#!/usr/bin/env bash
-# ka 启动器：始终执行同目录下版本号最大的 ka-v*.sh
-set -u
-self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
-dir="$(dirname "$self")"
-latest=""
-if [ -d "$dir" ]; then
-  latest="$(ls -1 "$dir"/ka-v[0-9]*.sh 2>/dev/null | sort -V 2>/dev/null | tail -n 1)"
-  [ -z "$latest" ] && latest="$(ls -1 "$dir"/ka-v[0-9]*.sh 2>/dev/null | sort | tail -n 1)"
-fi
-if [ -z "$latest" ]; then
-  if [ -f "$dir/ka.sh" ]; then
-    latest="$dir/ka.sh"
-  else
-    echo "ka: 找不到 ka-v*.sh 或 ka.sh" >&2
-    exit 1
-  fi
-fi
-exec bash "$latest" "$@"
-KA_LAUNCHER
-    chmod +x "$target/ka"
-  fi
+  write_launcher "$target"
 
   ln -sf "$target/ka" /usr/local/bin/ka
   ok "已安装到 $target（v$KA_VERSION）"
