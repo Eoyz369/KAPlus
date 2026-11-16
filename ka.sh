@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.38        归档文件: ka-v<版本>.sh
+#  版本: 0.0.39        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.38"
+KA_VERSION="0.0.39"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -2713,28 +2713,22 @@ cmd_cleanup() {
   ct="无"
   if [ "${ck:-0}" -gt 0 ]; then ct="$(human_size "$ck")"; fi
   local -a items=(
-    "卸载实例 · 逐个选择，默认只删一个"
+    "卸载实例 · 全部，或勾选多个"
     "清理下载缓存 · 当前 ${ct}"
     "卸载 ka 自身 · 保留实例"
+    "全部清理 · 实例 + 缓存 + ka"
     "返回"
   )
-  pick "卸载 / 清理" "四件事不一样，别选错" "${items[@]}" || return 0
+  pick "卸载 / 清理" "只是范围不同，下面都不可恢复" "${items[@]}" || return 0
   case "$PICK_RESULT" in
     0) cmd_uninstall ;;
     1) cmd_cache_clean ;;
     2) cmd_self_uninstall ;;
+    3) cmd_cleanup_all ;;
   esac
 }
 
-cmd_self_uninstall() {
-  need_root
-  warn "将删除 ka 自身：$KA_SELF"
-  dim "同时清理 /usr/local/bin/ka、$KA_CONF、$META_FILE"
-  dim "不会动任何 komari-agent 实例"
-  local go
-  ask "确认? (y/N)" "N" go
-  case "$go" in [Yy]*) ;; *) warn "已取消"; return 0 ;; esac
-
+self_remove_files() {
   rm -f /usr/local/bin/ka 2>/dev/null
   rm -f "$KA_CONF" 2>/dev/null
   rm -f "$META_FILE" 2>/dev/null
@@ -2747,7 +2741,37 @@ cmd_self_uninstall() {
       rm -f "$KA_DIR"/ka-v*.sh 2>/dev/null
       ;;
   esac
+}
+
+cmd_self_uninstall() {
+  need_root
+  warn "将删除 ka 自身：$KA_SELF"
+  dim "同时清理 /usr/local/bin/ka、$KA_CONF、$META_FILE"
+  dim "不会动任何 komari-agent 实例"
+  local go
+  ask "确认? (y/N)" "N" go
+  case "$go" in [Yy]*) ;; *) warn "已取消"; return 0 ;; esac
+  self_remove_files
   ok "ka 已卸载；实例仍在运行，可随时用面板重新接管"
+}
+
+cmd_cleanup_all() {
+  need_root
+  load_conf
+  warn "将卸载全部实例、清空下载缓存、删除 ka 自身"
+  dim "此操作不可恢复"
+  local go
+  ask "输入 yes 确认全部清理（直接回车取消）" "" go
+  [ "$go" = "yes" ] || { warn "已取消"; return 0; }
+  discover_instances
+  local i
+  for ((i = 0; i < D_COUNT; i++)); do
+    remove_index "$i" 1
+  done
+  rm -f "$AGENT_CACHE" "$AGENT_CACHE-zig" /tmp/ka-install.* /tmp/ka-update.* 2>/dev/null
+  self_remove_files
+  ok "已全部清理，退出"
+  exit 0
 }
 
 upgrade_apply() { # 下标：原地升级一个实例
@@ -3323,28 +3347,60 @@ cmd_uninstall() {
   discover_instances
   if [ "$D_COUNT" -eq 0 ]; then warn "没有可卸载的实例"; return 0; fi
 
-  local -a items=()
-  local i
-  for ((i = 0; i < D_COUNT; i++)); do
-    items+=("${D_NAME[$i]}  [${D_TAG[$i]}]")
-  done
-  items+=("${RED}全部卸载（${D_COUNT} 个）${RESET}")
-  pick "卸载实例" "逐个选择，默认只删选中的那个；全部删除在最后" "${items[@]}" || return 0
+  local i j
+  local -a scope=("全部（${D_COUNT} 个）" "手动勾选（可多选）")
+  pick "卸载实例" "先选范围：全部，还是自己勾" "${scope[@]}" || return 0
 
-  if [ "$PICK_RESULT" -eq "$D_COUNT" ]; then
-    local go
-    warn "将删除全部 ${D_COUNT} 个实例（服务 + 安装目录）"
-    ask "输入 yes 确认全部删除（直接回车取消）" "" go
-    if [ "$go" != "yes" ]; then
-      warn "已取消"
+  local -a targets=()
+  if [ "$PICK_RESULT" -eq 0 ]; then
+    for ((i = 0; i < D_COUNT; i++)); do targets+=("$i"); done
+  else
+    local -a names=()
+    for ((i = 0; i < D_COUNT; i++)); do names+=("${D_NAME[$i]}"); done
+    local picked=""
+    MULTI_NO_MANUAL=1
+    if ! pick_multi "选择实例" "勾选要卸载的实例（可多选）" "," picked "${names[@]}"; then
+      MULTI_NO_MANUAL=0
       return 0
     fi
-    for ((i = 0; i < D_COUNT; i++)); do
-      remove_index "$i" 1
+    MULTI_NO_MANUAL=0
+    if [ -z "$picked" ]; then
+      warn "没有勾选任何实例"
+      return 0
+    fi
+    local IFS_OLD="$IFS"
+    local -a sel=()
+    IFS=',' read -r -a sel <<< "$picked"
+    IFS="$IFS_OLD"
+    local pn
+    for pn in "${sel[@]}"; do
+      for ((j = 0; j < D_COUNT; j++)); do
+        if [ "${D_NAME[$j]}" = "$pn" ]; then targets+=("$j"); fi
+      done
     done
-  else
-    remove_index "$PICK_RESULT"
   fi
+  if [ "${#targets[@]}" -eq 0 ]; then
+    warn "没有选中实例"
+    return 0
+  fi
+
+  blank
+  warn "将卸载 ${#targets[@]} 个实例（停服务 + 删除目录）"
+  for i in "${targets[@]}"; do
+    dim "  · ${D_NAME[$i]}"
+  done
+  local go
+  if [ "${#targets[@]}" -ge "$D_COUNT" ]; then
+    ask "输入 yes 确认全部卸载（直接回车取消）" "" go
+    [ "$go" = "yes" ] || { warn "已取消"; return 0; }
+  else
+    ask "确认卸载? (y/N)" "N" go
+    case "$go" in [Yy]*) ;; *) warn "已取消"; return 0 ;; esac
+  fi
+
+  for i in "${targets[@]}"; do
+    remove_index "$i" 1
+  done
 }
 
 # ================================================================ 版本维护 ===
