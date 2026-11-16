@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.0.18-d6336c?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-0.0.21-d6336c?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/platform-Linux-7048e8?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/init-systemd%20%7C%20OpenRC-1c7ed6?style=flat-square" alt="init">
   <img src="https://img.shields.io/badge/shell-bash%204%2B-0ca678?style=flat-square" alt="shell">
@@ -22,7 +22,7 @@
 ```
   K O M A R I   A G E N T
   ────────────────────────────────────────
-  ka v0.0.17  · 多实例部署 · NAT 友好
+  ka v0.0.21  · 多实例部署 · NAT 友好
 ```
 
 ## 功能特性
@@ -72,7 +72,7 @@ ka
 
 ```
   ┃  主菜单
-     v0.0.17 · OpenRC · 已发现 1 个实例
+     v0.0.21 · OpenRC · 已发现 1 个实例
 
    ❯ 安装 / 新增实例
      实例管理
@@ -100,6 +100,8 @@ ka
 | `ka status` | 查看全部实例状态 |
 | `ka doctor` | 一键自检 |
 | `ka logs komari-agent-1` | 查看指定实例日志 |
+| `ka logs clean` | 清理日志，可开每日自动清理 |
+| `ka batch` | 批量重启 / 停止 / 启动 / 升级 / 卸载 |
 | `ka adopt` | 接管外部实例 |
 | `ka upgrade` | 原地升级 Agent |
 | `ka update` | 更新 ka 自身 |

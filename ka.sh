@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.17        归档文件: ka-v<版本>.sh
+#  版本: 0.0.21        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.17"
+KA_VERSION="0.0.21"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -327,7 +327,9 @@ pick_multi() { # 标题 副标题 分隔符 变量名 候选项...
     done
   done
 
-  local n="${#opts[@]}" total=$((n + 2)) sel_i=0
+  local n="${#opts[@]}" has_manual=1
+  [ "${MULTI_NO_MANUAL:-0}" = "1" ] && has_manual=0
+  local total=$((n + 1 + has_manual)) sel_i=0
   hide_cursor
   while :; do
     screen_home
@@ -342,12 +344,14 @@ pick_multi() { # 标题 副标题 分隔符 变量名 候选项...
       fi
     done
     printf '     %s──────%s\n' "$DIM" "$RESET"
-    if [ "$sel_i" -eq "$n" ]; then
-      printf '   %s❯%s %s\n' "$PINK" "$RESET" "手动输入…"
-    else
-      printf '     %s\n' "手动输入…"
+    if [ "$has_manual" -eq 1 ]; then
+      if [ "$sel_i" -eq "$n" ]; then
+        printf '   %s❯%s %s\n' "$PINK" "$RESET" "手动输入…"
+      else
+        printf '     %s\n' "手动输入…"
+      fi
     fi
-    if [ "$sel_i" -eq $((n + 1)) ]; then
+    if [ "$sel_i" -eq $((n + has_manual)) ]; then
       printf '   %s❯%s %s\n' "$PINK" "$RESET" "${GREEN}完成${RESET}"
     else
       printf '     %s\n' "完成"
@@ -361,7 +365,7 @@ pick_multi() { # 标题 副标题 分隔符 变量名 候选项...
       ENTER|SPACE)
         if [ "$sel_i" -lt "$n" ]; then
           if [ "${checked[$sel_i]}" -eq 1 ]; then checked[$sel_i]=0; else checked[$sel_i]=1; fi
-        elif [ "$sel_i" -eq "$n" ]; then
+        elif [ "$has_manual" -eq 1 ] && [ "$sel_i" -eq "$n" ]; then
           show_cursor
           screen_home
           draw_header "$title" "手动追加（多个用 $sep 分隔，回车返回）"
@@ -375,8 +379,8 @@ pick_multi() { # 标题 副标题 分隔符 变量名 候选项...
               [ -n "$x" ] || continue
               opts+=("$x"); checked+=("1")
             done
-            n="${#opts[@]}"; total=$((n + 2))
-            sel_i=$((n + 1))
+            n="${#opts[@]}"; total=$((n + 1 + has_manual))
+            sel_i=$((n + has_manual))
           fi
           hide_cursor
         else
@@ -630,6 +634,7 @@ AUTH_MODE="token"
 AD_KEY=""
 BATCH_NIC=0
 NIC_MAP=()
+MULTI_NO_MANUAL=0
 FORCE_SUFFIX=0
 NAME_START=1
 CANCELED=0
@@ -753,8 +758,50 @@ mask() {
 }
 
 # ================================================================ 环境/服务 ===
-need_root()    { [ "$(id -u)" -eq 0 ] || die "需要 root 权限，请用 sudo ka"; }
-need_curl()    { command -v curl >/dev/null 2>&1 || die "没有 curl，请先安装"; }
+need_root() {
+  if [ "$(id -u)" -eq 0 ]; then return 0; fi
+  if command -v sudo >/dev/null 2>&1; then
+    die "需要 root 权限：sudo ka"
+  fi
+  die "需要 root 权限：请用 root 登录或 su - 后再执行"
+}
+
+have_curl() { command -v curl >/dev/null 2>&1; }
+have_wget() { command -v wget >/dev/null 2>&1; }
+
+need_curl() {
+  if have_curl || have_wget; then return 0; fi
+  die "需要 curl 或 wget，请先安装其中一个"
+}
+
+dl_to() { # url 输出文件 [超时秒]
+  local url="$1" out="$2" t="${3:-30}"
+  if have_curl; then
+    curl -fsSL --max-time "$t" "$url" -o "$out"
+  else
+    wget -q -T "$t" -O "$out" "$url"
+  fi
+}
+
+dl_str() { # url [超时秒] → stdout
+  local url="$1" t="${2:-8}"
+  if have_curl; then
+    curl -fsSL --max-time "$t" "$url"
+  else
+    wget -q -T "$t" -O - "$url"
+  fi
+}
+
+http_code() { # url → 三位状态码或 000
+  local url="$1"
+  if have_curl; then
+    curl -o /dev/null -sS -k -w '%{http_code}' --max-time 8 "$url" 2>/dev/null || printf '000'
+  elif have_wget && wget -q --spider -T 8 "$url" >/dev/null 2>&1; then
+    printf '200'
+  else
+    printf '000'
+  fi
+}
 
 INIT_SYS=""
 detect_init() {
@@ -1035,7 +1082,7 @@ count_managed() {
 # ---------------------------------------------------------------- 元数据 ---
 META_FILE="${KA_META:-/etc/ka-meta.tsv}"
 
-http_get() { curl -fsSL --max-time 4 "$1" 2>/dev/null; }
+http_get() { dl_str "$1" 4 2>/dev/null; }
 
 detect_public_ip() {
   local u ip
@@ -1121,7 +1168,7 @@ fetch_installer() {
   [ -n "$KA_TMP" ] && [ -s "$KA_TMP" ] && return 0
   need_curl
   KA_TMP="$(mktemp /tmp/ka-install.XXXXXX)" || return 1
-  if ! curl -fsSL --max-time 120 "$KA_INSTALLER" -o "$KA_TMP" || [ ! -s "$KA_TMP" ]; then
+  if ! dl_to "$KA_INSTALLER" "$KA_TMP" 120 || [ ! -s "$KA_TMP" ]; then
     rm -f "$KA_TMP"
     KA_TMP=""
     return 1
@@ -1257,7 +1304,7 @@ step_endpoint() {
       *)  warn "必须以 http:// 或 https:// 开头" ;;
     esac
   done
-  code="$(curl -o /dev/null -sS -k -w '%{http_code}' --max-time 8 "$ENDPOINT" 2>/dev/null || printf '000')"
+  code="$(http_code "$ENDPOINT")"
   if [ "$code" = "000" ]; then
     warn "连不上 $ENDPOINT（网络 / 证书 / 地址有误），仍可继续尝试安装"
   else
@@ -1733,7 +1780,7 @@ do_install() {
   local tmp i token dir svc fails=0
   tmp="$(mktemp /tmp/ka-install.XXXXXX)" || die "无法创建临时文件"
   info "下载安装脚本…"
-  if ! curl -fsSL --max-time 120 "$KA_INSTALLER" -o "$tmp" || [ ! -s "$tmp" ]; then
+  if ! dl_to "$KA_INSTALLER" "$tmp" 120 || [ ! -s "$tmp" ]; then
     rm -f "$tmp"
     die "下载安装脚本失败，检查网络或换用 GitHub 代理"
   fi
@@ -1923,7 +1970,7 @@ cmd_doctor() {
       printf '  %s%s%s %s  未设置开机自启（重启后不会自动拉起）\n' "$YELL" "$G_WARN" "$RESET" "  "
     fi
     if [ -n "${D_EP[$i]}" ]; then
-      code="$(curl -o /dev/null -sS -k -w '%{http_code}' --max-time 6 "${D_EP[$i]}" 2>/dev/null || printf '000')"
+      code="$(http_code "${D_EP[$i]}")"
       if [ "$code" = "000" ]; then
         printf '  %s%s%s %s  面板连不上 %s\n' "$YELL" "$G_WARN" "$RESET" "  " "${D_EP[$i]}"
       else
@@ -1935,8 +1982,7 @@ cmd_doctor() {
   printf '  %s%d/%d 个实例在运行%s\n\n' "$GRAY" "$okc" "$D_COUNT" "$RESET"
 }
 
-state_cn() {
-  case "$1" in
+state_cn() {  case "$1" in
     active)   printf '运行中' ;;
     inactive) printf '已停止' ;;
     failed)   printf '失败' ;;
@@ -2214,39 +2260,183 @@ cmd_self_uninstall() {
   ok "ka 已卸载；实例仍在运行，可随时用面板重新接管"
 }
 
+upgrade_apply() { # 下标：原地升级一个实例
+  local idx="$1"
+  local n="${D_NAME[$idx]}" k="${D_KIND[$idx]}" dir="${D_DIR[$idx]}"
+  local ep="${D_EP[$idx]:-}" tk="${D_TK[$idx]:-}" ad="${D_AD[$idx]:-}" extra
+  if [ -z "$tk" ] && [ -z "$ad" ]; then
+    warn "$n 缺少 token / 自动发现密钥，跳过"
+    return 1
+  fi
+  extra="$(filter_args "${D_ARGS[$idx]:-}")"
+  svc_ctl stop "$n" "$k" || true
+  if reinstall_service "$dir" "$n" "$ep" "$tk" "$extra" "$ad"; then
+    enable_start "$n" "$k"
+    ok "$n 已升级"
+    return 0
+  fi
+  warn "$n 升级失败，尝试恢复"
+  svc_ctl start "$n" "$k" || true
+  return 1
+}
+
+params_apply() { # 下标：把当前全局参数套用到该实例
+  local idx="$1"
+  local n="${D_NAME[$idx]}" k="${D_KIND[$idx]}" dir="${D_DIR[$idx]}"
+  local ep="${D_EP[$idx]:-}" tk="${D_TK[$idx]:-}" ad="${D_AD[$idx]:-}"
+  local -a auth=()
+  if [ -n "$ad" ]; then
+    auth=(--auto-discovery "$ad")
+  elif [ -n "$tk" ]; then
+    auth=(-t "$tk")
+  else
+    warn "$n 缺少 token / 自动发现密钥，跳过"
+    return 1
+  fi
+  ENDPOINT="$ep"
+  build_args
+  svc_ctl stop "$n" "$k" || true
+  if bash "$KA_TMP" "${ARGS[@]}" "${auth[@]}" \
+       --install-dir "$dir" --install-service-name "$n" </dev/null; then
+    enable_start "$n" "$k"
+    ok "$n 参数已更新"
+    return 0
+  fi
+  warn "$n 更新失败，尝试恢复"
+  svc_ctl start "$n" "$k" || true
+  return 1
+}
+
 cmd_batch() {
   need_root
   load_conf
   discover_instances
-  if [ "$D_COUNT" -eq 0 ]; then warn "没有发现实例"; return 0; fi
-  local i total=0
+  local -a SVC=()
+  local i
   for ((i = 0; i < D_COUNT; i++)); do
-    if [ "${D_KIND[$i]}" != "proc" ]; then total=$((total + 1)); fi
+    [ "${D_KIND[$i]}" = "proc" ] && continue
+    SVC+=("$i")
   done
-  if [ "$total" -eq 0 ]; then warn "没有可批量操作的服务实例"; return 0; fi
-  local -a items=("全部重启" "全部停止" "全部启动")
-  pick "批量操作" "对 ${total} 个服务实例执行（不含裸进程）" "${items[@]}" || return 0
+  if [ "${#SVC[@]}" -eq 0 ]; then
+    warn "没有可批量操作的服务实例"
+    return 0
+  fi
+
+  local -a actions=("重启服务" "停止服务" "启动服务" "──" "升级 Agent" "修改参数" "──" "卸载实例")
+  pick "批量操作" "共 ${#SVC[@]} 个服务实例" "${actions[@]}" || return 0
+
   local act
   case "$PICK_RESULT" in
     0) act="restart" ;;
     1) act="stop" ;;
     2) act="start" ;;
+    4) act="upgrade" ;;
+    5) act="params" ;;
+    7) act="remove" ;;
+    *) return 0 ;;
   esac
-  local go
-  ask "确认对 ${total} 个服务执行 $act? (y/N)" "N" go
-  case "$go" in [Yy]*) ;; *) warn "已取消"; return 0 ;; esac
-  local okc=0
-  for ((i = 0; i < D_COUNT; i++)); do
-    if [ "${D_KIND[$i]}" = "proc" ]; then continue; fi
-    if svc_ctl "$act" "${D_NAME[$i]}" "${D_KIND[$i]}"; then
-      ok "${D_NAME[$i]} $act"
-      okc=$((okc + 1))
-    else
-      warn "${D_NAME[$i]} $act 失败"
+  local act_cn
+  case "$act" in
+    restart) act_cn="重启" ;;
+    stop)    act_cn="停止" ;;
+    start)   act_cn="启动" ;;
+    upgrade) act_cn="升级" ;;
+    params)  act_cn="修改参数" ;;
+    *)       act_cn="卸载" ;;
+  esac
+
+  local -a scope_items=("全部（${#SVC[@]} 个）" "手动勾选")
+  pick "执行范围" "对哪些实例执行「${act_cn}」" "${scope_items[@]}" || return 0
+
+  local -a targets=()
+  if [ "$PICK_RESULT" -eq 0 ]; then
+    targets=("${SVC[@]}")
+  else
+    local -a names=()
+    for i in "${SVC[@]}"; do names+=("${D_NAME[$i]}"); done
+    local picked_names=""
+    MULTI_NO_MANUAL=1
+    if ! pick_multi "选择实例" "勾选要${act_cn}的实例" "," picked_names "${names[@]}"; then
+      MULTI_NO_MANUAL=0
+      return 0
     fi
+    MULTI_NO_MANUAL=0
+    if [ -z "$picked_names" ]; then
+      warn "没有勾选任何实例"
+      return 0
+    fi
+    local IFS_OLD="$IFS"
+    local -a picked=()
+    IFS=',' read -r -a picked <<< "$picked_names"
+    IFS="$IFS_OLD"
+    local pn
+    for pn in "${picked[@]}"; do
+      for i in "${SVC[@]}"; do
+        if [ "${D_NAME[$i]}" = "$pn" ]; then targets+=("$i"); fi
+      done
+    done
+  fi
+  if [ "${#targets[@]}" -eq 0 ]; then
+    warn "没有选中实例"
+    return 0
+  fi
+
+  # 批量改参数：先编辑一次，再套用到每个选中实例
+  if [ "$act" = "params" ]; then
+    local first="${targets[0]}"
+    load_settings_from_args "${D_ARGS[$first]:-}"
+    ENDPOINT="${D_EP[$first]:-}"
+    ADV_MORE_DRAW="inst_draw2"
+    ADV_MORE_EDIT="inst_edit2"
+    ADV_MORE_N=6
+    if [ "$UI_TUI" -eq 1 ]; then
+      adv_run "批量修改参数" "编辑一次，套用到 ${#targets[@]} 个实例" adv_draw1 adv_edit1 10
+    else
+      step_advanced_plain
+    fi
+    ADV_MORE_DRAW="adv_draw2"
+    ADV_MORE_EDIT="adv_edit2"
+    ADV_MORE_N=8
+  fi
+
+  blank
+  if [ "$act" = "remove" ]; then
+    warn "将卸载 ${#targets[@]} 个实例（停服务并删除目录）"
+  else
+    warn "将对 ${#targets[@]} 个实例执行：$act_cn"
+  fi
+  for i in "${targets[@]}"; do
+    dim "  · ${D_NAME[$i]}"
+  done
+  local go
+  ask "确认? (y/N)" "N" go
+  case "$go" in [Yy]*) ;; *) warn "已取消"; return 0 ;; esac
+
+  if [ "$act" = "upgrade" ] || [ "$act" = "params" ]; then
+    fetch_installer || die "下载安装脚本失败"
+  fi
+
+  local okc=0
+  for i in "${targets[@]}"; do
+    case "$act" in
+      restart|stop|start)
+        if svc_ctl "$act" "${D_NAME[$i]}" "${D_KIND[$i]}"; then
+          ok "${D_NAME[$i]} $act_cn"
+          okc=$((okc + 1))
+        else
+          warn "${D_NAME[$i]} $act_cn 失败"
+        fi ;;
+      upgrade)
+        if upgrade_apply "$i"; then okc=$((okc + 1)); fi ;;
+      params)
+        if params_apply "$i"; then okc=$((okc + 1)); fi ;;
+      remove)
+        remove_index "$i" 1
+        okc=$((okc + 1)) ;;
+    esac
   done
   blank
-  printf '  %s%d/%d 成功%s\n\n' "$GRAY" "$okc" "$total" "$RESET"
+  printf '  %s%d/%d 成功%s\n\n' "$GRAY" "$okc" "${#targets[@]}" "$RESET"
 }
 
 cmd_adopt() {
@@ -2397,7 +2587,159 @@ cmd_upgrade() {
   printf '  %s%d/%d 成功%s\n\n' "$GRAY" "$okc" "${#todo[@]}" "$RESET"
 }
 
+LOG_CLEAN_KEEP="${LOG_CLEAN_KEEP:-2000}"
+
+human_size() {
+  local b="${1:-0}"
+  if [ "$b" -ge 1048576 ]; then
+    awk "BEGIN{printf \"%.1f MB\", $b/1048576}"
+  elif [ "$b" -ge 1024 ]; then
+    awk "BEGIN{printf \"%.0f KB\", $b/1024}"
+  else
+    printf '%s B' "$b"
+  fi
+}
+
+log_cron_path() {
+  if [ -d /etc/periodic/daily ]; then
+    printf '%s' /etc/periodic/daily/ka-logclean
+  elif [ -d /etc/cron.daily ]; then
+    printf '%s' /etc/cron.daily/ka-logclean
+  fi
+}
+
+trim_log_file() { # 文件 [保留行数]
+  local f="$1" n="${2:-$LOG_CLEAN_KEEP}" tmp sz
+  [ -f "$f" ] || return 0
+  sz="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+  [ "${sz:-0}" -lt 1048576 ] && return 0
+  tmp="$f.tmp.$$"
+  if tail -n "$n" "$f" > "$tmp" 2>/dev/null; then
+    chmod 640 "$tmp" 2>/dev/null || true
+    if mv -f "$tmp" "$f" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+rotate_messages() {
+  local f=/var/log/messages
+  [ -f "$f" ] || return 0
+  cp -f "$f" "$f.1" 2>/dev/null || return 1
+  : > "$f" 2>/dev/null || return 1
+  if command -v pidof >/dev/null 2>&1; then
+    local p
+    p="$(pidof syslogd 2>/dev/null || true)"
+    [ -n "$p" ] && kill -HUP $p 2>/dev/null || true
+  fi
+  return 0
+}
+
+install_log_cron() {
+  local p ka_bin
+  p="$(log_cron_path)"
+  if [ -z "$p" ]; then
+    warn "没有找到每日任务目录（/etc/periodic/daily 或 /etc/cron.daily）"
+    return 1
+  fi
+  ka_bin="/usr/local/bin/ka"
+  [ -x "$ka_bin" ] || ka_bin="/opt/ka/ka"
+  {
+    printf '#!/bin/sh\n'
+    printf '# 由 ka 生成的日志清理任务\n'
+    printf '[ -x "%s" ] && "%s" logs clean --quiet >/dev/null 2>&1\n' "$ka_bin" "$ka_bin"
+  } > "$p" || { warn "写入 $p 失败"; return 1; }
+  chmod +x "$p"
+  ok "已开启每日自动清理：$p"
+}
+
+remove_log_cron() {
+  local p
+  p="$(log_cron_path)"
+  if [ -n "$p" ] && [ -f "$p" ]; then
+    rm -f "$p"
+    ok "已关闭每日自动清理"
+  else
+    warn "当前没有开启自动清理"
+  fi
+}
+
+cmd_logs_clean() {
+  need_root
+  local mode="${1:-ask}"
+  case "$mode" in
+    --auto) install_log_cron; return $? ;;
+    --off)  remove_log_cron; return $? ;;
+    --quiet)
+      local qf
+      for qf in /var/log/komari*.log /var/log/ka-*.log; do
+        [ -f "$qf" ] && trim_log_file "$qf"
+      done
+      return 0 ;;
+  esac
+
+  local -a files=()
+  local f sz
+  for f in /var/log/komari*.log /var/log/ka-*.log; do
+    [ -f "$f" ] && files+=("$f")
+  done
+
+  printf '\n  %s%s%s %s日志占用%s\n' "$PURP" "$G_BAR" "$RESET" "$B" "$RESET"
+  rule 56
+  for f in "${files[@]}"; do
+    sz="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+    printf '  %s  %s%s%s\n' "$(human_size "${sz:-0}")" "$GRAY" "$f" "$RESET"
+  done
+  if [ -f /var/log/messages ]; then
+    sz="$(wc -c < /var/log/messages 2>/dev/null | tr -d ' ')"
+    printf '  %s  %s/var/log/messages%s（系统日志）\n' "$(human_size "${sz:-0}")" "$GRAY" "$RESET"
+  fi
+  if [ "${#files[@]}" -eq 0 ] && [ ! -f /var/log/messages ]; then
+    warn "没有找到可清理的日志"
+    return 0
+  fi
+  rule 56
+  blank
+
+  local go
+  ask "清理 agent 日志?（大于 1MB 的文件保留最近 ${LOG_CLEAN_KEEP} 行）(y/N)" "N" go
+  case "$go" in
+    [Yy]*) ;;
+    *) warn "已取消"; return 0 ;;
+  esac
+
+  for f in "${files[@]}"; do
+    if trim_log_file "$f"; then
+      ok "已清理 $f"
+    fi
+  done
+
+  if [ -f /var/log/messages ]; then
+    sz="$(wc -c < /var/log/messages 2>/dev/null | tr -d ' ')"
+    if [ "${sz:-0}" -gt 10485760 ]; then
+      local g2
+      ask "/var/log/messages 超过 10MB，轮转它?（备份为 messages.1）(y/N)" "N" g2
+      case "$g2" in
+        [Yy]*) if rotate_messages; then ok "已轮转 /var/log/messages"; else warn "轮转失败"; fi ;;
+      esac
+    fi
+  fi
+
+  blank
+  ask "开启每日自动清理? (y/N)" "N" go
+  case "$go" in
+    [Yy]*) install_log_cron ;;
+  esac
+}
+
 cmd_logs() {
+  if [ "${1:-}" = "clean" ]; then
+    shift
+    cmd_logs_clean "$@"
+    return $?
+  fi
   load_conf
   local id="${1:-1}" lines="${2:-80}"
   discover_instances
@@ -2484,7 +2826,7 @@ cmd_update() {
   local tmp
   tmp="$(mktemp /tmp/ka-update.XXXXXX)" || die "无法创建临时文件"
   info "检查更新：$url"
-  if ! curl -fsSL --max-time 30 "$url" -o "$tmp" || [ ! -s "$tmp" ]; then
+  if ! dl_to "$url" "$tmp" 30 || [ ! -s "$tmp" ]; then
     rm -f "$tmp"
     die "下载失败，检查网络或设置 GH_PROXY"
   fi
@@ -2698,6 +3040,7 @@ cmd_help() {
     ka batch              批量重启 / 停止 / 启动
     ka note [名字] [备注]  设置实例备注（地区/用途）
     ka logs <n|name|all>  查看日志，默认 80 行
+    ka logs clean         清理 agent 日志（可开每日自动清理）
 
   ${B}清理${RESET}
     ka uninstall          卸载实例（停服务 + 删目录）
@@ -2737,7 +3080,7 @@ cmd_menu() {
     else
       sub="v$KA_VERSION · $(init_label "$INIT_SYS") · 已发现 ${D_COUNT} 个实例"
     fi
-    items=("安装 / 新增实例" "实例管理" "批量操作" "自检" "卸载 / 清理" "检查更新" "退出")
+    items=("安装 / 新增实例" "实例管理" "批量操作" "自检" "清理日志" "卸载 / 清理" "检查更新" "退出")
     PICK_HINT="↑↓ 移动 · Enter 选择 · q 退出"
     pick "主菜单" "$sub" "${items[@]}" || return 0
     case "$PICK_RESULT" in
@@ -2745,9 +3088,10 @@ cmd_menu() {
       1) cmd_instances; pause_any ;;
       2) cmd_batch; pause_any ;;
       3) cmd_doctor; pause_any ;;
-      4) cmd_cleanup; pause_any ;;
-      5) cmd_update; pause_any ;;
-      6) return 0 ;;
+      4) cmd_logs clean; pause_any ;;
+      5) cmd_cleanup; pause_any ;;
+      6) cmd_update; pause_any ;;
+      7) return 0 ;;
     esac
   done
 }
