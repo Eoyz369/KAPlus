@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.0.17-d6336c?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-0.0.18-d6336c?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/platform-Linux-7048e8?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/init-systemd%20%7C%20OpenRC-1c7ed6?style=flat-square" alt="init">
   <img src="https://img.shields.io/badge/shell-bash%204%2B-0ca678?style=flat-square" alt="shell">
@@ -42,16 +42,22 @@
 
 > 需要 Linux + root，支持 systemd 与 OpenRC（Alpine）。
 
-**wget**
+**root 用户（大多数 VPS）**
+
+```bash
+wget -qO /tmp/ka.sh https://raw.githubusercontent.com/Eoyz369/KAPlus/main/ka.sh && bash /tmp/ka.sh self-install
+```
+
+**普通用户（系统里有 sudo）**
 
 ```bash
 wget -qO /tmp/ka.sh https://raw.githubusercontent.com/Eoyz369/KAPlus/main/ka.sh && sudo bash /tmp/ka.sh self-install
 ```
 
-**curl**
+没有 `wget` 可以用 `curl`：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Eoyz369/KAPlus/main/ka.sh -o /tmp/ka.sh && sudo bash /tmp/ka.sh self-install
+curl -fsSL https://raw.githubusercontent.com/Eoyz369/KAPlus/main/ka.sh -o /tmp/ka.sh && bash /tmp/ka.sh self-install
 ```
 
 装完直接输入：
