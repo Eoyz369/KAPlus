@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.55        归档文件: ka-v<版本>.sh
+#  版本: 0.0.57        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.55"
+KA_VERSION="0.0.57"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -301,11 +301,16 @@ mem_stats() {
 }
 
 disk_stats() {
-  local line total used cap i n pct
+  local line total used cap i n pct p
   DISKPCT=""
   DISK_TOTAL_KB=0
   DISK_USED_KB=0
-  line="$(df -k "${BASE_DIR:-/}" 2>/dev/null | tail -n 1)"
+  p="${BASE_DIR:-/}"
+  while [ ! -d "$p" ] && [ "$p" != "/" ]; do
+    p="$(dirname "$p")"
+  done
+  [ -d "$p" ] || p="/"
+  line="$(df -k "$p" 2>/dev/null | tail -n 1)"
   [ -n "$line" ] || return 0
   local -a f=()
   read -r -a f <<< "$line"
@@ -2210,8 +2215,8 @@ do_install() {
   if [ -r /sys/fs/cgroup/pids.max ]; then
     local pm_before pm_after
     pm_before="$(cat /sys/fs/cgroup/pids.max 2>/dev/null)"
-    if [ -n "$pm_before" ] && [ "$pm_before" != "max" ]; then
-      printf 'max' > /sys/fs/cgroup/pids.max 2>/dev/null || true
+    if [ -n "$pm_before" ] && [ "$pm_before" != "max" ] && [ -w /sys/fs/cgroup/pids.max ]; then
+      { printf 'max' > /sys/fs/cgroup/pids.max; } 2>/dev/null || true
       pm_after="$(cat /sys/fs/cgroup/pids.max 2>/dev/null)"
       if [ -n "$pm_after" ] && [ "$pm_after" != "$pm_before" ]; then
         ok "容器 pids 上限已从 $pm_before 调到 $pm_after"
@@ -2279,7 +2284,8 @@ do_install() {
       case "$continue_go" in [Yy]*) ;; *) warn "已取消"; return 0 ;; esac
     fi
 
-    memavail="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)"    local per_mb
+    memavail="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)"
+    local per_mb
     case "$AGENT_IMPL" in
       zig) per_mb=2 ;;
       *)   per_mb=18 ;;
