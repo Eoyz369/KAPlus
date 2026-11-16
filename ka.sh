@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.45        归档文件: ka-v<版本>.sh
+#  版本: 0.0.49        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.45"
+KA_VERSION="0.0.49"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -785,6 +785,7 @@ EXTRA_AGENT=""
 INSTALL_VERSION=""
 GH_PROXY=""
 INSTANCE_COUNT=1
+INSTALL_DELAY="${KA_INSTALL_DELAY:-0}"
 MULTI=0
 AUTH_MODE="token"
 AD_KEY=""
@@ -821,6 +822,7 @@ load_conf() {
   INSTALL_VERSION="${KA_INSTALL_VERSION:-$INSTALL_VERSION}"
   GH_PROXY="${KA_GH_PROXY:-$GH_PROXY}"
   INSTANCE_COUNT="${KA_INSTANCE_COUNT:-$INSTANCE_COUNT}"
+  INSTALL_DELAY="${KA_INSTALL_DELAY:-$INSTALL_DELAY}"
   AGENT_IMPL="${KA_IMPL:-$AGENT_IMPL}"
 }
 
@@ -850,6 +852,7 @@ KA_EXTRA='$EXTRA_AGENT'
 KA_INSTALL_VERSION='$INSTALL_VERSION'
 KA_GH_PROXY='$GH_PROXY'
 KA_INSTANCE_COUNT='$INSTANCE_COUNT'
+KA_INSTALL_DELAY='$INSTALL_DELAY'
 KA_IMPL='$AGENT_IMPL'
 EOF
   ) 2>/dev/null || true
@@ -1748,7 +1751,7 @@ adv_run() { # 标题 副标题 绘制函数 编辑函数 项数
 
 ADV_MORE_DRAW="adv_draw2"
 ADV_MORE_EDIT="adv_edit2"
-ADV_MORE_N=9
+ADV_MORE_N=10
 
 adv_draw1() {
   local s="$1"
@@ -1795,7 +1798,8 @@ adv_draw2() {
   cfg_row 5 "$s" "GitHub 代理"  "${WHITE}${GH_PROXY:-直连}${RESET}"
   cfg_row 6 "$s" "额外参数"     "${WHITE}${EXTRA_AGENT:-无}${RESET}"
   cfg_row 7 "$s" "Agent 实现"   "$impl_txt"
-  cfg_row 8 "$s" "返回"         "${GREEN}←${RESET}"
+  cfg_row 8 "$s" "安装间隔"     "${YELL}${INSTALL_DELAY:-0}${RESET} 秒（0=不等待）"
+  cfg_row 9 "$s" "返回"         "${GREEN}←${RESET}"
 }
 
 multi_nics() {
@@ -1825,7 +1829,11 @@ adv_edit2() {
     5) edit_str "GitHub 代理（如 https://ghproxy.net，空=直连）" GH_PROXY ;;
     6) edit_str "额外参数（原样传给 agent，空=无）" EXTRA_AGENT ;;
     7) if [ "$AGENT_IMPL" = "zig" ]; then AGENT_IMPL="go"; else AGENT_IMPL="zig"; fi ;;
-    8) return 1 ;;
+    8) edit_str "安装间隔（秒，可小数，0=不等待）" INSTALL_DELAY
+       case "$INSTALL_DELAY" in
+         ''|*[!0-9.]*) INSTALL_DELAY="0"; warn "已重置为 0" ;;
+       esac ;;
+    9) return 1 ;;
   esac
   return 0
 }
@@ -1953,6 +1961,9 @@ step_confirm() {
   panel_row "远程控制" "$([ "$DISABLE_WEBSSH" -eq 1 ] && printf '已禁用' || printf '开启')"
   panel_row "自动更新" "$([ "$DISABLE_AUTOUPDATE" -eq 1 ] && printf '已禁用' || printf '开启')"
   panel_row "根目录"   "$BASE_DIR"
+  if [ "${INSTALL_DELAY:-0}" != "0" ]; then
+    panel_row "安装间隔" "${INSTALL_DELAY} 秒（错峰启动）"
+  fi
   blank
   for ((i = 1; i <= INSTANCE_COUNT; i++)); do
     if [ "$AUTH_MODE" = "ad" ]; then
@@ -2008,6 +2019,25 @@ agent_arch() {
 AGENT_CACHE="${KA_AGENT_CACHE:-/opt/ka/cache/komari-agent}"
 AGENT_IMPL="${KA_IMPL:-go}"
 AGENT_BIN=""
+INSTALL_ERR=""
+
+disk_avail_kb() {
+  local p="${1:-/}" line cap i n
+  [ -d "$p" ] || p="/"
+  line="$(df -k "$p" 2>/dev/null | tail -n 1)"
+  [ -n "$line" ] || return 1
+  local -a f=()
+  read -r -a f <<< "$line"
+  n="${#f[@]}"
+  cap=0
+  for ((i = 0; i < n; i++)); do
+    case "${f[$i]}" in
+      *%) cap=$((i + 1)); break ;;
+    esac
+  done
+  [ "$cap" -ge 4 ] || return 1
+  printf '%s' "${f[$((cap - 2))]}"
+}
 AGENT_GOGC="${KA_AGENT_GOGC:-50}"
 AGENT_MEMLIMIT="${KA_AGENT_MEMLIMIT:-32MiB}"
 AGENT_GOMAXPROCS="${KA_AGENT_GOMAXPROCS:-1}"
@@ -2100,8 +2130,9 @@ prepare_agent_cache() { # [实现] [强制刷新]
 }
 
 install_agent_local() { # 目录 服务名 参数串
-  local dir="$1" svc="$2" args="$3" exe="$1/agent"
-  mkdir -p "$dir" || return 1
+  local dir="$1" svc="$2" args="$3" exe="$1/agent" out
+  INSTALL_ERR=""
+  mkdir -p "$dir" || { INSTALL_ERR="创建目录失败"; return 1; }
 
   case "$INIT_SYS" in
     openrc)
@@ -2117,9 +2148,12 @@ install_agent_local() { # 目录 服务名 参数串
   esac
 
   rm -f "$exe"
-  [ -n "$AGENT_BIN" ] || return 1
-  cp -f "$AGENT_BIN" "$exe" || return 1
-  chmod +x "$exe" || return 1
+  [ -n "$AGENT_BIN" ] || { INSTALL_ERR="没有可用的 Agent 二进制"; return 1; }
+  if ! cp -f "$AGENT_BIN" "$exe"; then
+    INSTALL_ERR="复制二进制失败（磁盘可能已满）"
+    return 1
+  fi
+  chmod +x "$exe" || { INSTALL_ERR="chmod 失败"; return 1; }
 
   case "$INIT_SYS" in
     openrc)
@@ -2141,7 +2175,11 @@ install_agent_local() { # 目录 服务名 参数串
       } > "/etc/init.d/$svc" || return 1
       chmod +x "/etc/init.d/$svc"
       rc-update add "$svc" default >/dev/null 2>&1 || true
-      rc-service "$svc" start >/dev/null 2>&1 || return 1
+      out="$(rc-service "$svc" start 2>&1)"
+      if [ $? -ne 0 ]; then
+        INSTALL_ERR="服务启动失败：$out"
+        return 1
+      fi
       ;;
     systemd)
       {
@@ -2154,7 +2192,11 @@ install_agent_local() { # 目录 服务名 参数串
         printf '[Install]\nWantedBy=multi-user.target\n'
       } > "/etc/systemd/system/$svc.service" || return 1
       systemctl daemon-reload >/dev/null 2>&1 || true
-      systemctl enable --now "$svc" >/dev/null 2>&1 || return 1
+      out="$(systemctl enable --now "$svc" 2>&1)"
+      if [ $? -ne 0 ]; then
+        INSTALL_ERR="服务启动失败：$out"
+        return 1
+      fi
       ;;
   esac
   return 0
@@ -2165,7 +2207,7 @@ do_install() {
   save_conf
   build_args
   install_args
-  local tmp="" i token dir svc fails=0 fast=0 args_str
+  local tmp="" i token dir svc fails=0 fast=0 args_str consec=0 aborted=0 delay="${INSTALL_DELAY:-0}"
   local -a auth=()
 
   if prepare_agent_cache "$AGENT_IMPL"; then
@@ -2188,6 +2230,27 @@ do_install() {
       die "下载安装脚本失败，检查网络或换用 GitHub 代理"
     fi
     ok "安装脚本已就绪"
+  fi
+
+  if [ "$fast" -eq 1 ]; then
+    local bsz bkb need avail memavail continue_go
+    bsz="$(wc -c < "$AGENT_BIN" 2>/dev/null)"
+    [ -n "$bsz" ] || bsz=0
+    bkb=$((bsz / 1024))
+    need=$((INSTANCE_COUNT * bkb))
+    avail="$(disk_avail_kb "$BASE_DIR" 2>/dev/null)"
+    [ -n "$avail" ] || avail=0
+    if [ "$avail" -gt 0 ] && [ "$need" -gt "$avail" ]; then
+      warn "磁盘空间不够：需要约 $((need / 1024)) MB，当前可用 $((avail / 1024)) MB"
+      dim "改用 Zig 版（每实例约 1MB）或减少实例数，否则装到一半会失败"
+      return 1
+    fi
+    memavail="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)"
+    if [ -n "$memavail" ] && [ $((INSTANCE_COUNT * 15000)) -gt "$memavail" ]; then
+      warn "内存可能不够：${INSTANCE_COUNT} 个实例预计 ≥$((INSTANCE_COUNT * 15))MB，当前可用 $((memavail / 1024))MB"
+      ask "仍然继续? (y/N)" "N" continue_go
+      case "$continue_go" in [Yy]*) ;; *) warn "已取消"; return 0 ;; esac
+    fi
   fi
 
   for ((i = 1; i <= INSTANCE_COUNT; i++)); do
@@ -2218,9 +2281,24 @@ do_install() {
       args_str="${args_str% }"
       if install_agent_local "$dir" "$svc" "$args_str"; then
         ok "$svc 已安装并启动"
+        consec=0
       else
-        err "$svc 安装失败"
+        err "$svc 安装失败${INSTALL_ERR:+：$INSTALL_ERR}"
         fails=$((fails + 1))
+        consec=$((consec + 1))
+        if [ "$consec" -ge 3 ]; then
+          err "连续 $consec 个失败"
+          if [ -n "$INSTALL_ERR" ]; then dim "最后一次错误：$INSTALL_ERR"; fi
+          local dav mav cont
+          dav="$(disk_avail_kb "$BASE_DIR" 2>/dev/null)"
+          mav="$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)"
+          dim "当前可用：磁盘 ${dav:+$((dav / 1024))MB}${dav:-?} · 内存 ${mav:-?}MB"
+          ask "继续安装剩余 $((INSTANCE_COUNT - i)) 个?（y=继续 / N=停止）" "N" cont
+          case "$cont" in
+            [Yy]*) consec=0 ;;
+            *) aborted=1; break ;;
+          esac
+        fi
       fi
     else
       case "$INIT_SYS" in
@@ -2243,14 +2321,20 @@ do_install() {
         fails=$((fails + 1))
       fi
     fi
-    sleep 1
+    if [ "$delay" != "0" ]; then sleep "$delay"; fi
   done
   if [ -n "$tmp" ]; then rm -f "$tmp"; fi
+
+  local limit="$INSTANCE_COUNT"
+  if [ "$aborted" -eq 1 ]; then
+    limit=$((i - 1))
+    err "已中止：完成 $limit 个，剩余 $((INSTANCE_COUNT - limit)) 个未安装"
+  fi
 
   rule
   blank
   printf '  %s%s 部署结果 %s\n\n' "$B" "▍" "$RESET"
-  for ((i = 1; i <= INSTANCE_COUNT; i++)); do
+  for ((i = 1; i <= limit; i++)); do
     svc="$(inst_svc "$i")"
     local st_text act col dot
     act="$(svc_state "$svc" "$INIT_SYS")"
@@ -2287,6 +2371,7 @@ reset_install_state() {
   GH_PROXY=""
   AGENT_IMPL="go"
   INSTANCE_COUNT=1
+  INSTALL_DELAY="${KA_INSTALL_DELAY:-0}"
   MULTI=0
   AUTH_MODE="token"
   AD_KEY=""
@@ -2671,7 +2756,7 @@ cmd_edit_params() {
   fi
   ADV_MORE_DRAW="adv_draw2"
   ADV_MORE_EDIT="adv_edit2"
-  ADV_MORE_N=9
+  ADV_MORE_N=10
 
   build_args
   blank
@@ -3002,7 +3087,7 @@ cmd_batch() {
     fi
     ADV_MORE_DRAW="adv_draw2"
     ADV_MORE_EDIT="adv_edit2"
-    ADV_MORE_N=9
+    ADV_MORE_N=10
   fi
 
   blank
