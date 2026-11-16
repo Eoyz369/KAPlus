@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.0.21-d6336c?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-0.0.23-d6336c?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/platform-Linux-7048e8?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/init-systemd%20%7C%20OpenRC-1c7ed6?style=flat-square" alt="init">
   <img src="https://img.shields.io/badge/shell-bash%204%2B-0ca678?style=flat-square" alt="shell">
@@ -22,7 +22,7 @@
 ```
   K O M A R I   A G E N T
   ────────────────────────────────────────
-  ka v0.0.21  · 多实例部署 · NAT 友好
+  ka v0.0.23  · 多实例部署 · NAT 友好
 ```
 
 ## 功能特性
@@ -72,7 +72,7 @@ ka
 
 ```
   ┃  主菜单
-     v0.0.21 · OpenRC · 已发现 1 个实例
+     v0.0.23 · OpenRC · 已发现 1 个实例
 
    ❯ 安装 / 新增实例
      实例管理
@@ -126,6 +126,26 @@ ka
 <summary><b>自动发现能一台机器开多个吗？</b></summary>
 
 可以。每个实例必须使用独立目录，工具默认就是这样安装的。
+</details>
+
+<details>
+<summary><b>一次装很多实例，会重复下载吗？</b></summary>
+
+不会。Agent 二进制只下载一次（缓存在 <code>/opt/ka/cache/</code>，7 天自动刷新），后面每个实例直接复制，不再走网络。
+</details>
+
+<details>
+<summary><b>实例多了内存占用高，怎么压？</b></summary>
+
+每个实例是独立进程，内存主要花在 Go 运行时，可以从三个方向压：
+
+<ul>
+<li>给服务注入 <code>GOGC=50</code>、<code>GOMEMLIMIT=32MiB</code>：新装的实例默认已带，老实例用「批量操作 → 内存调优」补上</li>
+<li>减少实例数：只给需要单独展示的网卡建节点，其余用 <code>--include-nics</code> 合并统计</li>
+<li>加 swap 兜底：<code>fallocate -l 2G /swapfile &amp;&amp; chmod 600 /swapfile &amp;&amp; mkswap /swapfile &amp;&amp; swapon /swapfile</code></li>
+</ul>
+
+<code>ka status</code> 会显示所有 agent 进程的内存总和，方便对比调优前后。
 </details>
 
 <details>

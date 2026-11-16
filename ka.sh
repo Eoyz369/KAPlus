@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.21        归档文件: ka-v<版本>.sh
+#  版本: 0.0.23        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.21"
+KA_VERSION="0.0.23"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -931,8 +931,7 @@ svc_logs() { # 名字 类型 行数
   esac
 }
 
-svc_enabled() { # 名字 类型
-  local n="$1" k="$2"
+svc_enabled() { # 名字 类型  local n="$1" k="$2"
   case "$k" in
     systemd) systemctl is-enabled "$n" 2>/dev/null || true ;;
     openrc)
@@ -1079,6 +1078,23 @@ count_managed() {
   printf '%s' "$n"
 }
 
+agent_mem_kb() { # 输出 "进程数 总RSS(KB)"
+  local p cmd rss n=0 total=0
+  for p in /proc/[0-9]*; do
+    [ -r "$p/cmdline" ] || continue
+    cmd="$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)"
+    case "$cmd" in
+      */komari/*|*/komari-agent*) ;;
+      *) continue ;;
+    esac
+    rss="$(awk '/^VmRSS:/{print $2}' "$p/status" 2>/dev/null)"
+    [ -n "$rss" ] || continue
+    total=$((total + rss))
+    n=$((n + 1))
+  done
+  printf '%s %s' "$n" "$total"
+}
+
 # ---------------------------------------------------------------- 元数据 ---
 META_FILE="${KA_META:-/etc/ka-meta.tsv}"
 
@@ -1197,7 +1213,7 @@ reinstall_service() { # 目录 服务名 面板 [token] [额外参数] [自动�
   fi
   install_args
   # shellcheck disable=SC2086
-  bash "$KA_TMP" -e "$ep" "${auth[@]}" "${IARGS[@]}" \
+  sh "$KA_TMP" -e "$ep" "${auth[@]}" "${IARGS[@]}" \
     --install-dir "$dir" --install-service-name "$name" $extra </dev/null
 }
 
@@ -1772,19 +1788,178 @@ step_confirm() {
   CONFIRM=install
 }
 
+agent_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64)        printf 'amd64' ;;
+    aarch64|arm64)       printf 'arm64' ;;
+    armv7*|armv6*)       printf 'arm' ;;
+    i386|i686)           printf '386' ;;
+    loongarch64|loong64) printf 'loong64' ;;
+    *) return 1 ;;
+  esac
+}
+
+AGENT_CACHE="${KA_AGENT_CACHE:-/opt/ka/cache/komari-agent}"
+AGENT_GOGC="${KA_AGENT_GOGC:-50}"
+AGENT_MEMLIMIT="${KA_AGENT_MEMLIMIT:-32MiB}"
+AGENT_GOMAXPROCS="${KA_AGENT_GOMAXPROCS:-1}"
+
+tune_service_env() { # 服务名 类型：给服务注入 Go 运行时内存参数
+  local svc="$1" kind="$2" f tmp
+  local gogc="$AGENT_GOGC" mem="$AGENT_MEMLIMIT" procs="$AGENT_GOMAXPROCS"
+  case "$kind" in
+    systemd)
+      f="/etc/systemd/system/$svc.service"
+      [ -f "$f" ] || return 1
+      if grep -q 'GOGC=' "$f"; then return 0; fi
+      tmp="$f.tmp.$$"
+      awk -v line="Environment=\"GOGC=$gogc\" \"GOMEMLIMIT=$mem\" \"GOMAXPROCS=$procs\"" '
+        { print }
+        /^\[Service\]$/ && !ins { print line; ins = 1 }
+      ' "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+      mv -f "$tmp" "$f"
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      ;;
+    openrc)
+      f="/etc/init.d/$svc"
+      [ -f "$f" ] || return 1
+      if grep -q 'GOGC=' "$f"; then return 0; fi
+      tmp="$f.tmp.$$"
+      {
+        head -n 1 "$f"
+        printf 'export GOGC=%s\n' "$gogc"
+        printf 'export GOMEMLIMIT=%s\n' "$mem"
+        printf 'export GOMAXPROCS=%s\n' "$procs"
+        tail -n +2 "$f"
+      } > "$tmp" || { rm -f "$tmp"; return 1; }
+      chmod +x "$tmp"
+      mv -f "$tmp" "$f"
+      ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+prepare_agent_cache() {
+  local arch dir url path ver tmp
+  arch="$(agent_arch)" || return 1
+  dir="$(dirname "$AGENT_CACHE")"
+  mkdir -p "$dir" 2>/dev/null || return 1
+
+  # 已有缓存且不超过 7 天，直接用
+  if [ -s "$AGENT_CACHE" ] && [ -z "${INSTALL_VERSION:-}" ]; then
+    if [ -z "$(find "$AGENT_CACHE" -mtime +7 2>/dev/null)" ]; then
+      return 0
+    fi
+  fi
+
+  ver="${INSTALL_VERSION:-latest}"
+  if [ "$ver" = "latest" ]; then
+    path="latest/download"
+  else
+    path="download/$ver"
+  fi
+  url="https://github.com/komari-monitor/komari-agent/releases/$path/komari-agent-linux-$arch"
+  if [ -n "${GH_PROXY:-}" ]; then url="$GH_PROXY/$url"; fi
+
+  tmp="$AGENT_CACHE.tmp.$$"
+  info "下载 Agent 二进制（只下一次，后续实例复用）"
+  if ! dl_to "$url" "$tmp" 300 || [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod +x "$tmp" 2>/dev/null || true
+  if ! mv -f "$tmp" "$AGENT_CACHE"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod +x "$AGENT_CACHE" 2>/dev/null || true
+  return 0
+}
+
+install_agent_local() { # 目录 服务名 参数串
+  local dir="$1" svc="$2" args="$3" exe="$1/agent"
+  mkdir -p "$dir" || return 1
+
+  case "$INIT_SYS" in
+    openrc)
+      rc-service "$svc" stop >/dev/null 2>&1 || true
+      rc-update del "$svc" default >/dev/null 2>&1 || true
+      rm -f "/etc/init.d/$svc" ;;
+    systemd)
+      systemctl stop "$svc" >/dev/null 2>&1 || true
+      systemctl disable "$svc" >/dev/null 2>&1 || true
+      rm -f "/etc/systemd/system/$svc.service"
+      systemctl daemon-reload >/dev/null 2>&1 || true ;;
+    *) return 1 ;;
+  esac
+
+  rm -f "$exe"
+  cp -f "$AGENT_CACHE" "$exe" || return 1
+  chmod +x "$exe" || return 1
+
+  case "$INIT_SYS" in
+    openrc)
+      {
+        printf '#!/sbin/openrc-run\n'
+        printf 'export GOGC=%s\n' "$AGENT_GOGC"
+        printf 'export GOMEMLIMIT=%s\n' "$AGENT_MEMLIMIT"
+        printf 'export GOMAXPROCS=%s\n\n' "$AGENT_GOMAXPROCS"
+        printf 'name="Komari Agent Service"\n'
+        printf 'description="Komari monitoring agent"\n'
+        printf 'command="%s"\n' "$exe"
+        printf 'command_args="%s"\n' "$args"
+        printf 'command_user="root"\n'
+        printf 'directory="%s"\n' "$dir"
+        printf 'pidfile="/run/%s.pid"\n' "$svc"
+        printf 'retry="SIGTERM/30"\n'
+        printf 'supervisor=supervise-daemon\n\n'
+        printf 'depend() {\n\tneed net\n\tafter network\n}\n'
+      } > "/etc/init.d/$svc" || return 1
+      chmod +x "/etc/init.d/$svc"
+      rc-update add "$svc" default >/dev/null 2>&1 || true
+      rc-service "$svc" start >/dev/null 2>&1 || return 1
+      ;;
+    systemd)
+      {
+        printf '[Unit]\nDescription=Komari Agent Service\nAfter=network.target\n\n'
+        printf '[Service]\nType=simple\n'
+        printf 'Environment="GOGC=%s" "GOMEMLIMIT=%s" "GOMAXPROCS=%s"\n' \
+          "$AGENT_GOGC" "$AGENT_MEMLIMIT" "$AGENT_GOMAXPROCS"
+        printf 'ExecStart=%s %s\n' "$exe" "$args"
+        printf 'WorkingDirectory=%s\nRestart=always\nUser=root\n\n' "$dir"
+        printf '[Install]\nWantedBy=multi-user.target\n'
+      } > "/etc/systemd/system/$svc.service" || return 1
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      systemctl enable --now "$svc" >/dev/null 2>&1 || return 1
+      ;;
+  esac
+  return 0
+}
+
 do_install() {
   need_root; need_curl
   save_conf
   build_args
   install_args
-  local tmp i token dir svc fails=0
-  tmp="$(mktemp /tmp/ka-install.XXXXXX)" || die "无法创建临时文件"
-  info "下载安装脚本…"
-  if ! dl_to "$KA_INSTALLER" "$tmp" 120 || [ ! -s "$tmp" ]; then
-    rm -f "$tmp"
-    die "下载安装脚本失败，检查网络或换用 GitHub 代理"
+  local tmp="" i token dir svc fails=0 fast=0 args_str
+  local -a auth=()
+
+  if prepare_agent_cache; then
+    fast=1
+    ok "Agent 已缓存，${INSTANCE_COUNT} 个实例直接复制，不再重复下载"
+    if [ "$INSTANCE_COUNT" -gt 20 ]; then
+      dim "提示：每个实例复制一份 Agent（约 11MB），共约 $((INSTANCE_COUNT * 11))MB 磁盘"
+    fi
+  else
+    tmp="$(mktemp /tmp/ka-install.XXXXXX)" || die "无法创建临时文件"
+    info "下载安装脚本…"
+    if ! dl_to "$KA_INSTALLER" "$tmp" 120 || [ ! -s "$tmp" ]; then
+      rm -f "$tmp"
+      die "下载安装脚本失败，检查网络或换用 GitHub 代理"
+    fi
+    ok "安装脚本已就绪"
   fi
-  ok "安装脚本已就绪（$(wc -c < "$tmp" | tr -d ' ') 字节）"
 
   for ((i = 1; i <= INSTANCE_COUNT; i++)); do
     token="${TOKENS[$((i - 1))]:-}"
@@ -1794,7 +1969,7 @@ do_install() {
       INCLUDE_NICS="${NIC_MAP[$((i - 1))]}"
       build_args
     fi
-    local -a auth=()
+    auth=()
     if [ "$AUTH_MODE" = "ad" ]; then
       auth=(--auto-discovery "$AD_KEY")
     else
@@ -1808,25 +1983,40 @@ do_install() {
       printf '  %s%s%s %s%s%s  %stoken %s%s\n' \
         "$PINK" "$G_BAR" "$RESET" "$B" "$svc" "$RESET" "$GRAY" "$(mask "$token")" "$RESET"
     fi
-    case "$INIT_SYS" in
-      systemd) systemctl stop "$svc" >/dev/null 2>&1 || true ;;
-      openrc)  rc-service "$svc" stop >/dev/null 2>&1 || true ;;
-    esac
-    if bash "$tmp" "${ARGS[@]}" "${IARGS[@]}" "${auth[@]}" \
-         --install-dir "$dir" --install-service-name "$svc" </dev/null; then
-      case "$INIT_SYS" in
-        systemd) systemctl enable --now "$svc" >/dev/null 2>&1 || true ;;
-        openrc)  rc-service "$svc" start >/dev/null 2>&1 || true
-                 rc-update add "$svc" default >/dev/null 2>&1 || true ;;
-      esac
-      ok "$svc 已安装并启动"
+
+    if [ "$fast" -eq 1 ]; then
+      args_str="$(printf '%s ' "${ARGS[@]}")${auth[*]}"
+      args_str="${args_str% }"
+      if install_agent_local "$dir" "$svc" "$args_str"; then
+        ok "$svc 已安装并启动"
+      else
+        err "$svc 安装失败"
+        fails=$((fails + 1))
+      fi
     else
-      err "$svc 安装失败"
-      fails=$((fails + 1))
+      case "$INIT_SYS" in
+        systemd) systemctl stop "$svc" >/dev/null 2>&1 || true ;;
+        openrc)  rc-service "$svc" stop >/dev/null 2>&1 || true ;;
+      esac
+      if sh "$tmp" "${ARGS[@]}" "${IARGS[@]}" "${auth[@]}" \
+           --install-dir "$dir" --install-service-name "$svc" </dev/null; then
+        case "$INIT_SYS" in
+          systemd) systemctl enable --now "$svc" >/dev/null 2>&1 || true ;;
+          openrc)  rc-service "$svc" start >/dev/null 2>&1 || true
+                   rc-update add "$svc" default >/dev/null 2>&1 || true ;;
+        esac
+        if tune_service_env "$svc" "$INIT_SYS"; then
+          svc_ctl restart "$svc" "$INIT_SYS" >/dev/null 2>&1 || true
+        fi
+        ok "$svc 已安装并启动"
+      else
+        err "$svc 安装失败"
+        fails=$((fails + 1))
+      fi
     fi
-    sleep 2
+    sleep 1
   done
-  rm -f "$tmp"
+  if [ -n "$tmp" ]; then rm -f "$tmp"; fi
 
   rule
   blank
@@ -1941,6 +2131,12 @@ cmd_status() {
   local conns="未知"
   if command -v ss >/dev/null 2>&1; then
     conns="$(ss -tnp 2>/dev/null | grep -c 'komari')"
+  fi
+  local mnum mkb
+  read -r mnum mkb <<< "$(agent_mem_kb)"
+  if [ "${mkb:-0}" -gt 0 ]; then
+    printf '  %sAgent 进程 %s 个 · 内存约 %s MB%s\n' \
+      "$GRAY" "$mnum" "$(awk "BEGIN{printf \"%.0f\", $mkb/1024}")" "$RESET"
   fi
   printf '  %s共 %s 个 · 面板连接 %s 条 · 受管 %s 个%s\n\n' \
     "$GRAY" "$D_COUNT" "$conns" "$(count_managed)" "$RESET"
@@ -2218,7 +2414,7 @@ cmd_edit_params() {
   else
     auth=(-t "$tk")
   fi
-  if bash "$KA_TMP" "${ARGS[@]}" "${auth[@]}" \
+  if sh "$KA_TMP" "${ARGS[@]}" "${auth[@]}" \
        --install-dir "$dir" --install-service-name "$n" </dev/null; then
     enable_start "$n" "$k"
     ok "$n 参数已更新并重启"
@@ -2272,6 +2468,9 @@ upgrade_apply() { # 下标：原地升级一个实例
   svc_ctl stop "$n" "$k" || true
   if reinstall_service "$dir" "$n" "$ep" "$tk" "$extra" "$ad"; then
     enable_start "$n" "$k"
+    if tune_service_env "$n" "$k"; then
+      svc_ctl restart "$n" "$k" >/dev/null 2>&1 || true
+    fi
     ok "$n 已升级"
     return 0
   fi
@@ -2296,9 +2495,12 @@ params_apply() { # 下标：把当前全局参数套用到该实例
   ENDPOINT="$ep"
   build_args
   svc_ctl stop "$n" "$k" || true
-  if bash "$KA_TMP" "${ARGS[@]}" "${auth[@]}" \
+  if sh "$KA_TMP" "${ARGS[@]}" "${auth[@]}" \
        --install-dir "$dir" --install-service-name "$n" </dev/null; then
     enable_start "$n" "$k"
+    if tune_service_env "$n" "$k"; then
+      svc_ctl restart "$n" "$k" >/dev/null 2>&1 || true
+    fi
     ok "$n 参数已更新"
     return 0
   fi
@@ -2322,7 +2524,7 @@ cmd_batch() {
     return 0
   fi
 
-  local -a actions=("重启服务" "停止服务" "启动服务" "──" "升级 Agent" "修改参数" "──" "卸载实例")
+  local -a actions=("重启服务" "停止服务" "启动服务" "──" "升级 Agent" "修改参数" "内存调优" "──" "卸载实例")
   pick "批量操作" "共 ${#SVC[@]} 个服务实例" "${actions[@]}" || return 0
 
   local act
@@ -2332,7 +2534,8 @@ cmd_batch() {
     2) act="start" ;;
     4) act="upgrade" ;;
     5) act="params" ;;
-    7) act="remove" ;;
+    6) act="memtune" ;;
+    8) act="remove" ;;
     *) return 0 ;;
   esac
   local act_cn
@@ -2342,6 +2545,7 @@ cmd_batch() {
     start)   act_cn="启动" ;;
     upgrade) act_cn="升级" ;;
     params)  act_cn="修改参数" ;;
+    memtune) act_cn="内存调优" ;;
     *)       act_cn="卸载" ;;
   esac
 
@@ -2430,6 +2634,14 @@ cmd_batch() {
         if upgrade_apply "$i"; then okc=$((okc + 1)); fi ;;
       params)
         if params_apply "$i"; then okc=$((okc + 1)); fi ;;
+      memtune)
+        if tune_service_env "${D_NAME[$i]}" "${D_KIND[$i]}"; then
+          svc_ctl restart "${D_NAME[$i]}" "${D_KIND[$i]}" >/dev/null 2>&1 || true
+          ok "${D_NAME[$i]} 已应用内存参数"
+          okc=$((okc + 1))
+        else
+          warn "${D_NAME[$i]} 应用内存参数失败"
+        fi ;;
       remove)
         remove_index "$i" 1
         okc=$((okc + 1)) ;;
