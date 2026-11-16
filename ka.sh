@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.41        归档文件: ka-v<版本>.sh
+#  版本: 0.0.45        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.41"
+KA_VERSION="0.0.45"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -3809,6 +3809,27 @@ valid_hostname() {
   return 0
 }
 
+etc_hostname() {
+  local h=""
+  if [ -r /etc/hostname ]; then
+    h="$(head -n 1 /etc/hostname 2>/dev/null)"
+  fi
+  printf '%s' "$h"
+}
+
+in_container() {
+  if [ -f /.dockerenv ] || [ -f /run/.containerenv ]; then return 0; fi
+  grep -qaE '(docker|lxc|kubepods|containerd|podman)' /proc/1/cgroup 2>/dev/null && return 0
+  return 1
+}
+
+has_cap_sys_admin() {
+  local cap
+  cap="$(awk '/^CapEff:/{print $2}' /proc/self/status 2>/dev/null)"
+  [ -n "$cap" ] || return 1
+  [ $((0x$cap & 0x200000)) -ne 0 ]
+}
+
 cmd_hostname() {
   need_root
   local cur new go
@@ -3845,29 +3866,53 @@ cmd_hostname() {
       warn "写入 /etc/hostname 失败${msg:+：$msg}"
       return 1
     fi
-    if command -v hostname >/dev/null 2>&1; then
-      if ! hostname "$new" 2>"$errf"; then
-        msg="$(cat "$errf" 2>/dev/null)"
-        warn "设置内核主机名失败${msg:+：$msg}"
-      fi
+    local hok=0
+    if command -v hostname >/dev/null 2>&1 && hostname "$new" 2>"$errf"; then
+      hok=1
+    fi
+    if [ "$hok" -eq 0 ] && [ -x /bin/hostname ] && /bin/hostname "$new" 2>>"$errf"; then
+      hok=1
+    fi
+    if [ "$hok" -eq 0 ] && command -v busybox >/dev/null 2>&1 && busybox hostname "$new" 2>>"$errf"; then
+      hok=1
+    fi
+    if [ "$hok" -eq 0 ]; then
+      # 再试 /proc 接口（等价系统调用，少数环境只开这个）
+      printf '%s' "$new" > /proc/sys/kernel/hostname 2>>"$errf" || true
+    fi
+    if [ "$(hostname 2>/dev/null)" != "$new" ]; then
+      msg="$(cat "$errf" 2>/dev/null)"
+      warn "设置内核主机名失败${msg:+：$msg}"
     fi
   fi
   rm -f "$errf"
 
   local now saved
   now="$(hostname 2>/dev/null)"
-  saved="$(head -n 1 /etc/hostname 2>/dev/null)"
-  if [ "$now" = "$new" ]; then
-    ok "内核主机名已改成 $now"
-  else
-    warn "内核主机名仍是 ${now:-未知}"
-  fi
+  saved="$(etc_hostname)"
   if [ "$saved" = "$new" ]; then
-    ok "/etc/hostname 已写入 $saved（重启后保持）"
+    ok "/etc/hostname 已写入 $saved"
   else
-    warn "/etc/hostname 内容是 ${saved:-空}，开机可能不会保持"
+    warn "/etc/hostname 内容是 ${saved:-空}"
   fi
-  dim "SSH 提示符要重新登录才会变；依赖主机名的服务需重启"
+
+  if [ "$now" = "$new" ]; then
+    ok "内核主机名已生效：$now"
+    dim "bash 的 \\h 是启动时缓存的：当前会话提示符不会变，重新登录或 exec bash -l 才会显示新名字"
+    return 0
+  fi
+
+  warn "内核主机名还是 ${now:-未知}（没有生效）"
+  if ! has_cap_sys_admin; then
+    dim "当前环境缺少 CAP_SYS_ADMIN，内核不允许改主机名（容器最常见）"
+    dim "容器里的主机名由运行时决定，请在宿主机侧设置"
+  elif in_container; then
+    dim "检测到容器环境：内核主机名由宿主机/运行时决定"
+    dim "要改请在宿主机侧设置：LXC 配置、docker run --hostname"
+  else
+    dim "手动看完整报错：hostname $new"
+  fi
+  return 1
 }
 
 cmd_menu() {
@@ -3884,10 +3929,18 @@ cmd_menu() {
   while :; do
     discover_instances
     detect_init >/dev/null
-    if [ "$D_COUNT" -eq 0 ]; then
-      sub="v$KA_VERSION · $(init_label "$INIT_SYS") · 未发现实例 · $(hostname 2>/dev/null)"
+    local hk hf hs
+    hk="$(hostname 2>/dev/null)"
+    hf="$(etc_hostname)"
+    if [ -n "$hf" ] && [ "$hf" != "$hk" ]; then
+      hs="$hk（文件 $hf）"
     else
-      sub="v$KA_VERSION · $(init_label "$INIT_SYS") · ${D_COUNT} 个实例 · $(hostname 2>/dev/null)"
+      hs="$hk"
+    fi
+    if [ "$D_COUNT" -eq 0 ]; then
+      sub="v$KA_VERSION · $(init_label "$INIT_SYS") · 未发现实例 · $hs"
+    else
+      sub="v$KA_VERSION · $(init_label "$INIT_SYS") · ${D_COUNT} 个实例 · $hs"
     fi
     items=("安装 / 新增实例" "实例管理" "批量操作" "自检" "修改主机名" "清理日志" "卸载 / 清理" "检查更新" "退出")
     PICK_HINT="↑↓ 移动 · Enter 选择 · q 退出"
