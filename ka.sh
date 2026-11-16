@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.39        归档文件: ka-v<版本>.sh
+#  版本: 0.0.41        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.39"
+KA_VERSION="0.0.41"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -262,6 +262,8 @@ MEM_TOTAL_KB=0
 MEM_USED_KB=0
 DISK_TOTAL_KB=0
 DISK_USED_KB=0
+MEMD=""
+DISKD=""
 
 human_kb() {
   local kb="${1:-0}"
@@ -334,6 +336,14 @@ refresh_sys() {
   SYS_TS=$now
   mem_stats
   disk_stats
+  MEMD=""
+  if [ "${MEM_TOTAL_KB:-0}" -gt 0 ]; then
+    MEMD="$(human_kb "$MEM_USED_KB")/$(human_kb "$MEM_TOTAL_KB")"
+  fi
+  DISKD=""
+  if [ "${DISK_TOTAL_KB:-0}" -gt 0 ]; then
+    DISKD="$(human_kb "$DISK_USED_KB")/$(human_kb "$DISK_TOTAL_KB")"
+  fi
 }
 
 cpu_stats() {
@@ -386,19 +396,13 @@ metric_seg() {
 sys_line() {
   refresh_sys
   cpu_stats
-  local load memd="" diskd=""
+  local load
   load="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
-  if [ "${MEM_TOTAL_KB:-0}" -gt 0 ]; then
-    memd="$(human_kb "$MEM_USED_KB")/$(human_kb "$MEM_TOTAL_KB")"
-  fi
-  if [ "${DISK_TOTAL_KB:-0}" -gt 0 ]; then
-    diskd="$(human_kb "$DISK_USED_KB")/$(human_kb "$DISK_TOTAL_KB")"
-  fi
   printf '  %s  %s\n' \
     "$(metric_seg "CPU" "$CPUPCT")" \
-    "$(metric_seg "内存" "$MEMPCT" "$memd")"
+    "$(metric_seg "内存" "$MEMPCT" "$MEMD")"
   printf '  %s  %s●%s 负载 %s' \
-    "$(metric_seg "磁盘" "$DISKPCT" "$diskd")" \
+    "$(metric_seg "磁盘" "$DISKPCT" "$DISKD")" \
     "$GRAY" "$RESET" "${load:-—}"
 }
 
@@ -2262,9 +2266,42 @@ do_install() {
   fi
 }
 
+reset_install_state() {
+  ENDPOINT=""
+  BASE_DIR="/opt/komari"
+  SVC_PREFIX="komari-agent"
+  INTERVAL="1.0"
+  INFO_INTERVAL="5"
+  DISABLE_WEBSSH=0
+  DISABLE_AUTOUPDATE=0
+  MEM_CACHE=0
+  GET_IP_NIC=0
+  INSECURE=0
+  GPU_MONITOR=0
+  INCLUDE_NICS=""
+  EXCLUDE_NICS=""
+  MOUNT_POINTS=""
+  MONTH_ROTATE="0"
+  EXTRA_AGENT=""
+  INSTALL_VERSION=""
+  GH_PROXY=""
+  AGENT_IMPL="go"
+  INSTANCE_COUNT=1
+  MULTI=0
+  AUTH_MODE="token"
+  AD_KEY=""
+  BATCH_NIC=0
+  NIC_MAP=()
+  FORCE_SUFFIX=0
+  NAME_START=1
+  TOKENS=()
+  ARGS=()
+}
+
 cmd_wizard() {
   [ -t 0 ] || die "向导需要交互式终端，请直接登录服务器后运行 ka"
   tui_init
+  reset_install_state
   load_conf
   CANCELED=0
   CONFIRM=""
@@ -2646,24 +2683,16 @@ cmd_edit_params() {
   ask "应用并重启服务? (y/N)" "N" go
   case "$go" in [Yy]*) ;; *) warn "已取消"; return 0 ;; esac
 
-  fetch_installer || die "下载安装脚本失败"
-  info "停止 $n"
-  svc_ctl stop "$n" "$k" || true
-  local -a auth=()
-  if [ -n "$ad" ]; then
-    auth=(--auto-discovery "$ad")
-  else
-    auth=(-t "$tk")
+  if [ "$AGENT_IMPL" != "zig" ]; then
+    fetch_installer || die "下载安装脚本失败"
   fi
-  if sh "$KA_TMP" "${ARGS[@]}" "${auth[@]}" \
-       --install-dir "$dir" --install-service-name "$n" </dev/null; then
-    enable_start "$n" "$k"
+  info "应用新参数到 $n"
+  if params_apply "$idx"; then
     ok "$n 参数已更新并重启"
-  else
-    err "更新失败，尝试恢复"
-    svc_ctl start "$n" "$k" || true
-    return 1
+    return 0
   fi
+  err "更新失败"
+  return 1
 }
 
 cache_total_kb() {
@@ -2813,6 +2842,28 @@ params_apply() { # 下标：把当前全局参数套用到该实例
   ENDPOINT="$ep"
   build_args
   svc_ctl stop "$n" "$k" || true
+
+  if [ "$AGENT_IMPL" = "zig" ]; then
+    if ! prepare_agent_cache zig 0; then
+      warn "下载 Zig Agent 失败"
+      svc_ctl start "$n" "$k" || true
+      return 1
+    fi
+    local args_str
+    args_str="$(printf '%s ' "${ARGS[@]}")"
+    args_str="${args_str% }"
+    if install_agent_local "$dir" "$n" "$args_str"; then
+      enable_start "$n" "$k"
+      tune_service_env "$n" "$k" >/dev/null 2>&1 || true
+      svc_ctl restart "$n" "$k" >/dev/null 2>&1 || true
+      ok "$n 参数已更新"
+      return 0
+    fi
+    warn "$n 更新失败，尝试恢复"
+    svc_ctl start "$n" "$k" || true
+    return 1
+  fi
+
   if sh "$KA_TMP" "${ARGS[@]}" "${auth[@]}" \
        --install-dir "$dir" --install-service-name "$n" </dev/null; then
     enable_start "$n" "$k"
@@ -3780,21 +3831,43 @@ cmd_hostname() {
   case "$go" in [Yy]*) ;; *) warn "已取消"; return 0 ;; esac
 
   detect_init >/dev/null
-  local applied=0
+  local applied=0 errf msg
+  errf="$(mktemp /tmp/ka-hostname.XXXXXX 2>/dev/null || printf '')"
+  [ -z "$errf" ] && errf=/dev/null
+
   if [ "$INIT_SYS" = "systemd" ] && command -v hostnamectl >/dev/null 2>&1; then
-    if hostnamectl set-hostname "$new" >/dev/null 2>&1; then applied=1; fi
+    if hostnamectl set-hostname "$new" 2>"$errf"; then applied=1; fi
   fi
   if [ "$applied" -eq 0 ]; then
-    printf '%s\n' "$new" > /etc/hostname 2>/dev/null || {
-      warn "写入 /etc/hostname 失败"
+    if ! printf '%s\n' "$new" > /etc/hostname 2>"$errf"; then
+      msg="$(cat "$errf" 2>/dev/null)"
+      rm -f "$errf"
+      warn "写入 /etc/hostname 失败${msg:+：$msg}"
       return 1
-    }
+    fi
     if command -v hostname >/dev/null 2>&1; then
-      hostname "$new" >/dev/null 2>&1 || true
+      if ! hostname "$new" 2>"$errf"; then
+        msg="$(cat "$errf" 2>/dev/null)"
+        warn "设置内核主机名失败${msg:+：$msg}"
+      fi
     fi
   fi
-  ok "主机名已改为 $new"
-  dim "当前 SSH 会话的提示符要重新登录才变；有服务依赖旧主机名的话请重启对应服务"
+  rm -f "$errf"
+
+  local now saved
+  now="$(hostname 2>/dev/null)"
+  saved="$(head -n 1 /etc/hostname 2>/dev/null)"
+  if [ "$now" = "$new" ]; then
+    ok "内核主机名已改成 $now"
+  else
+    warn "内核主机名仍是 ${now:-未知}"
+  fi
+  if [ "$saved" = "$new" ]; then
+    ok "/etc/hostname 已写入 $saved（重启后保持）"
+  else
+    warn "/etc/hostname 内容是 ${saved:-空}，开机可能不会保持"
+  fi
+  dim "SSH 提示符要重新登录才会变；依赖主机名的服务需重启"
 }
 
 cmd_menu() {
@@ -3812,9 +3885,9 @@ cmd_menu() {
     discover_instances
     detect_init >/dev/null
     if [ "$D_COUNT" -eq 0 ]; then
-      sub="v$KA_VERSION · $(init_label "$INIT_SYS") · 未发现实例"
+      sub="v$KA_VERSION · $(init_label "$INIT_SYS") · 未发现实例 · $(hostname 2>/dev/null)"
     else
-      sub="v$KA_VERSION · $(init_label "$INIT_SYS") · 已发现 ${D_COUNT} 个实例"
+      sub="v$KA_VERSION · $(init_label "$INIT_SYS") · ${D_COUNT} 个实例 · $(hostname 2>/dev/null)"
     fi
     items=("安装 / 新增实例" "实例管理" "批量操作" "自检" "修改主机名" "清理日志" "卸载 / 清理" "检查更新" "退出")
     PICK_HINT="↑↓ 移动 · Enter 选择 · q 退出"
