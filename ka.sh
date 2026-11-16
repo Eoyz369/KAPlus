@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.51        归档文件: ka-v<版本>.sh
+#  版本: 0.0.52        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.51"
+KA_VERSION="0.0.52"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -2204,6 +2204,8 @@ install_agent_local() { # 目录 服务名 参数串
 
 do_install() {
   need_root; need_curl
+  # 尽量放开进程数上限，批量起服务时 openrc-run 需要 fork
+  ulimit -u unlimited 2>/dev/null || ulimit -u 8192 2>/dev/null || true
   save_conf
   build_args
   install_args
@@ -2245,8 +2247,27 @@ do_install() {
       dim "改用 Zig 版（每实例约 1MB）或减少实例数，否则装到一半会失败"
       return 1
     fi
-    memavail="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)"
-    local per_mb
+    local nmax pidsmax need_tasks bad=0
+    need_tasks=$((INSTANCE_COUNT * 4 + 64))
+    nmax="$(ulimit -u 2>/dev/null)"
+    if [ -n "$nmax" ] && [ "$nmax" != "unlimited" ] && [ "${nmax:-0}" -gt 0 ] && [ "$need_tasks" -gt "$nmax" ]; then
+      warn "进程数上限不够：预计需要约 $need_tasks 个线程，当前 ulimit -u = $nmax"
+      bad=1
+    fi
+    if [ -r /sys/fs/cgroup/pids.max ]; then
+      pidsmax="$(cat /sys/fs/cgroup/pids.max 2>/dev/null)"
+      if [ -n "$pidsmax" ] && [ "$pidsmax" != "max" ] && [ "${pidsmax:-0}" -gt 0 ] && [ "$need_tasks" -gt "$pidsmax" ]; then
+        warn "cgroup 进程数上限不够：pids.max=$pidsmax，预计需要约 $need_tasks 个线程"
+        bad=1
+      fi
+    fi
+    if [ "$bad" -eq 1 ]; then
+      dim "可以先 ulimit -u unlimited；容器需平台调大 pids 限制；实在不行减少实例数"
+      ask "仍然继续? (y/N)" "N" continue_go
+      case "$continue_go" in [Yy]*) ;; *) warn "已取消"; return 0 ;; esac
+    fi
+
+    memavail="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)"    local per_mb
     case "$AGENT_IMPL" in
       zig) per_mb=2 ;;
       *)   per_mb=18 ;;
