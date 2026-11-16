@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.34        归档文件: ka-v<版本>.sh
+#  版本: 0.0.36        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.34"
+KA_VERSION="0.0.36"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -362,8 +362,9 @@ metric_seg() {
   else
     col="$GREEN"
   fi
-  filled=$((pct / 20))
-  for ((i = 0; i < 5; i++)); do
+  filled=$(((pct * 10 + 99) / 100))
+  if [ "$filled" -gt 10 ]; then filled=10; fi
+  for ((i = 0; i < 10; i++)); do
     if [ "$i" -lt "$filled" ]; then
       bar+="${col}${G_FULL}"
     else
@@ -3356,8 +3357,13 @@ ver_gt() { # $1 > $2 ?
 cmd_update() {
   load_conf
   need_curl
-  local check=0
-  [ "${1:-}" = "--check" ] && check=1
+  local check=0 clean=0 a
+  for a in "$@"; do
+    case "$a" in
+      --check) check=1 ;;
+      --clean) clean=1 ;;
+    esac
+  done
 
   local url="$KA_UPDATE_BASE/ka.sh"
   if [ -n "${GH_PROXY:-}" ]; then url="$GH_PROXY/$url"; fi
@@ -3404,6 +3410,7 @@ cmd_update() {
     [Nn]*) rm -f "$tmp"; warn "已取消"; return 0 ;;
   esac
 
+  local new_exec=""
   if [ -f "$KA_DIR/ka.sh" ] || ls "$KA_DIR"/ka-v*.sh >/dev/null 2>&1; then
     # 托管布局：写版本文件，launcher 会自动挑最新的
     local dst="$KA_DIR/ka-v$remote.sh"
@@ -3417,6 +3424,7 @@ cmd_update() {
     if [ -f "$KA_DIR/ka.sh" ]; then
       cp -f "$tmp" "$KA_DIR/ka.sh" && chmod +x "$KA_DIR/ka.sh"
     fi
+    new_exec="$dst"
   else
     # 手动拷贝的单个脚本：原子替换，避免执行到一半被截断
     local new="$KA_SELF.new.$$"
@@ -3426,11 +3434,40 @@ cmd_update() {
     if ! mv -f "$new" "$KA_SELF"; then
       rm -f "$tmp" "$new"; die "替换 $KA_SELF 失败"
     fi
+    new_exec="$KA_SELF"
   fi
 
   rm -f "$tmp"
-  ok "已更新到 v$remote（旧版本文件保留）"
-  dim "重新运行 ka 生效"
+  ok "已更新到 v$remote"
+
+  local f oldn=0
+  local -a olds=()
+  for f in "$KA_DIR"/ka-v*.sh; do
+    [ -e "$f" ] || continue
+    [ "$(readlink -f "$f")" = "$(readlink -f "$new_exec")" ] && continue
+    olds+=("$f")
+  done
+  oldn="${#olds[@]}"
+  if [ "$oldn" -gt 0 ]; then
+    local c
+    if [ "$clean" -eq 1 ]; then
+      c="y"
+    else
+      ask "删除 $oldn 个旧版本文件?（只保留 v$remote）(y/N)" "N" c
+    fi
+    case "$c" in
+      [Yy]*) for f in "${olds[@]}"; do rm -f "$f"; done
+             ok "已删除 $oldn 个旧版本" ;;
+    esac
+  fi
+
+  blank
+  local sw
+  ask "立即切换到新版本? (Y/n)" "Y" sw
+  case "$sw" in
+    [Nn]*) dim "下次运行 ka 就是 v$remote"; return 0 ;;
+  esac
+  exec bash "$new_exec"
 }
 
 ka_next_version() {
@@ -3587,7 +3624,7 @@ cmd_help() {
     ka self-uninstall     卸载 ka 自身（保留实例）
 
   ${B}版本${RESET}
-    ka update [--check]   从 GitHub 拉取最新版本（--check 只检查）
+    ka update [--check|--clean]  更新 ka（--clean 顺手删旧版本）
     ka version            版本与归档信息
     ka bump               发布新版本，旧文件保留
     ka self-install       安装到 /opt/ka 并建立全局 ka 命令
