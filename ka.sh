@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.57        归档文件: ka-v<版本>.sh
+#  版本: 0.0.59        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.57"
+KA_VERSION="0.0.59"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -565,7 +565,7 @@ pick_multi() { # 标题 副标题 分隔符 变量名 候选项...
 select_nics_multi() { # 需要选中的网卡数量
   local want="$1" tmp="" x
   local -a c=()
-  while IFS= read -r x; do [ -n "$x" ] && c+=("$x"); done <<< "$(detect_nics)"
+  while IFS= read -r x; do [ -n "$x" ] && c+=("$x"); done <<< "$(auto_nics "")"
   while :; do
     if ! pick_multi "按网卡分配" "勾选 ${want} 块网卡（对应 ${want} 个实例）" "," tmp ${c[@]+"${c[@]}"}; then
       return 1
@@ -582,8 +582,8 @@ select_nics_multi() { # 需要选中的网卡数量
 select_nics_any() {
   local tmp="" x
   local -a c=()
-  while IFS= read -r x; do [ -n "$x" ] && c+=("$x"); done <<< "$(detect_nics)"
-  if ! pick_multi "按网卡批量" "每个勾选的网卡一个实例" "," tmp ${c[@]+"${c[@]}"}; then
+  while IFS= read -r x; do [ -n "$x" ] && c+=("$x"); done <<< "$(auto_nics "")"
+  if ! pick_multi "按网卡批量" "勾选本批要装的网卡，剩下的下次再来" "," tmp ${c[@]+"${c[@]}"}; then
     return 1
   fi
   NIC_MAP=()
@@ -597,10 +597,38 @@ select_nics_any() {
   return 0
 }
 
+used_nics() { # 已被现有实例绑定的网卡
+  local i tok
+  for ((i = 0; i < D_COUNT; i++)); do
+    printf '%s\n' "${D_ARGS[$i]:-}"
+  done | tr ' ' '\n' | (
+    flag=0
+    while IFS= read -r tok; do
+      if [ "$flag" -eq 1 ]; then
+        flag=0
+        case "$tok" in
+          ''|-*) ;;
+          *) printf '%s\n' "$tok" | tr ',' '\n' ;;
+        esac
+      elif [ "$tok" = "--include-nics" ]; then
+        flag=1
+      else
+        case "$tok" in
+          --include-nics=*) printf '%s\n' "${tok#--include-nics=}" | tr ',' '\n' ;;
+        esac
+      fi
+    done
+  ) | sort -u
+}
+
 auto_nics() { # [名称通配过滤，如 fip*]
-  local pat="${1:-}" n
+  local pat="${1:-}" n used
+  used=" $(used_nics | tr '\n' ' ') "
   while IFS= read -r n; do
     [ -n "$n" ] || continue
+    case "$used" in
+      *" $n "*) continue ;;
+    esac
     case "$n" in
       lo|docker*|veth*|br-*|virbr*|sit*|tunl*|ip6tnl*|dummy*) continue ;;
     esac
@@ -1564,18 +1592,34 @@ step_ad() {
   NIC_MAP=()
   local -a dn=()
   local dx db dm
-  while IFS= read -r dx; do [ -n "$dx" ] && dn+=("$dx"); done <<< "$(detect_nics)"
+  while IFS= read -r dx; do [ -n "$dx" ] && dn+=("$dx"); done <<< "$(auto_nics "")"
   if [ "${#dn[@]}" -ge 2 ]; then
-    ask "按网卡批量？每个网卡一个实例（检测到 ${#dn[@]} 块）(y/N)" "N" db
+    ask "按网卡批量？每个网卡一个实例（可用 ${#dn[@]} 块）(y/N)" "N" db
     case "$db" in
       [Yy]*)
         BATCH_NIC=1
+        local ub
+        ub="$(used_nics | tr '\n' ' ')"
+        if [ -n "${ub// /}" ]; then
+          dim "已绑定网卡会自动跳过：$ub"
+        fi
         ask_int "网卡分配方式（1=自动 2=手动勾选）" "1" dm 1 2
         if [ "$dm" -eq 1 ]; then
-          local pf
-          dim "检测到网卡：$(detect_nics | tr '\n' ' ')"
+          local pf want avail_n
+          dim "可用网卡：$(auto_nics "" | tr '\n' ' ')"
           ask "网卡名过滤（支持通配，如 fip*；空=全部）" "" pf
-          auto_pick_nics 0 "$pf" || { warn "没有可用网卡（过滤：${pf:-无}）"; return 1; }
+          avail_n="$(auto_nics "$pf" | wc -l | tr -d ' ')"
+          [ -n "$avail_n" ] || avail_n=0
+          if [ "$avail_n" -eq 0 ]; then
+            warn "没有可用网卡（过滤：${pf:-无}）"
+            return 1
+          fi
+          ask_int "本批安装数量（0=全部 ${avail_n} 块）" "0" want 0 999
+          if [ "$want" -gt "$avail_n" ]; then
+            warn "可用只有 $avail_n 块，按全部处理"
+            want=0
+          fi
+          auto_pick_nics "$want" "$pf" || { warn "分配网卡失败"; return 1; }
         else
           select_nics_any || return 1
         fi
@@ -1661,17 +1705,22 @@ step_tokens() {
   if [ "$INSTANCE_COUNT" -ge 2 ]; then
     local -a dn=()
     local dx db dm
-    while IFS= read -r dx; do [ -n "$dx" ] && dn+=("$dx"); done <<< "$(detect_nics)"
+    while IFS= read -r dx; do [ -n "$dx" ] && dn+=("$dx"); done <<< "$(auto_nics "")"
     if [ "${#dn[@]}" -ge 2 ]; then
       blank
-      ask "按网卡分配？每实例只统计一块网卡（检测到 ${#dn[@]} 块）(y/N)" "N" db
+      ask "按网卡分配？每实例只统计一块网卡（可用 ${#dn[@]} 块）(y/N)" "N" db
       case "$db" in
         [Yy]*)
           BATCH_NIC=1
+          local ub
+          ub="$(used_nics | tr '\n' ' ')"
+          if [ -n "${ub// /}" ]; then
+            dim "已绑定网卡会自动跳过：$ub"
+          fi
           ask_int "网卡分配方式（1=自动 2=手动勾选）" "1" dm 1 2
           if [ "$dm" -eq 1 ]; then
             local pf
-            dim "检测到网卡：$(detect_nics | tr '\n' ' ')"
+            dim "可用网卡：$(auto_nics "" | tr '\n' ' ')"
             ask "网卡名过滤（支持通配，如 fip*；空=全部）" "" pf
             if ! auto_pick_nics "$INSTANCE_COUNT" "$pf"; then
               warn "可用网卡不足 ${INSTANCE_COUNT} 块（过滤：${pf:-无}）"
