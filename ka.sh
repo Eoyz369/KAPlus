@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  ka  ·  Komari Agent 部署器
-#  版本: 0.0.59        归档文件: ka-v<版本>.sh
+#  版本: 0.0.60        归档文件: ka-v<版本>.sh
 #  版本规则: 每次修改 +0.0.1（0.0.1 → 0.0.2 → 0.0.3），旧文件全部保留
 #
 #  用法:
@@ -22,7 +22,7 @@
 
 set -u
 
-KA_VERSION="0.0.59"
+KA_VERSION="0.0.60"
 KA_BUMP_STYLE="patch"
 KA_INSTALLER="https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
 KA_UPDATE_BASE="${KA_UPDATE_BASE:-https://raw.githubusercontent.com/Eoyz369/KAPlus/main}"
@@ -2992,8 +2992,29 @@ cmd_cleanup_all() {
   exit 0
 }
 
-upgrade_apply() { # 下标：原地升级一个实例
-  local idx="$1"
+set_endpoint_for() { # 下标 新地址：只改 -e，其它参数保留
+  local idx="$1" ep="$2"
+  local n="${D_NAME[$idx]}" k="${D_KIND[$idx]}" dir="${D_DIR[$idx]}"
+  local tk="${D_TK[$idx]:-}" ad="${D_AD[$idx]:-}" extra
+  if [ -z "$tk" ] && [ -z "$ad" ]; then
+    warn "$n 缺少 token / 自动发现密钥，跳过"
+    return 1
+  fi
+  extra="$(filter_args "${D_ARGS[$idx]:-}")"
+  svc_ctl stop "$n" "$k" || true
+  if reinstall_service "$dir" "$n" "$ep" "$tk" "$extra" "$ad"; then
+    enable_start "$n" "$k"
+    tune_service_env "$n" "$k" >/dev/null 2>&1 || true
+    svc_ctl restart "$n" "$k" >/dev/null 2>&1 || true
+    ok "$n → $ep"
+    return 0
+  fi
+  warn "$n 修改失败，尝试恢复"
+  svc_ctl start "$n" "$k" || true
+  return 1
+}
+
+upgrade_apply() { # 下标：原地升级一个实例  local idx="$1"
   local n="${D_NAME[$idx]}" k="${D_KIND[$idx]}" dir="${D_DIR[$idx]}"
   local ep="${D_EP[$idx]:-}" tk="${D_TK[$idx]:-}" ad="${D_AD[$idx]:-}" extra
   if [ -z "$tk" ] && [ -z "$ad" ]; then
@@ -3105,7 +3126,7 @@ cmd_batch() {
     return 0
   fi
 
-  local -a actions=("重启服务" "停止服务" "启动服务" "──" "升级 Agent" "修改参数" "内存调优" "切换 Agent 实现" "──" "卸载实例")
+  local -a actions=("重启服务" "停止服务" "启动服务" "──" "升级 Agent" "修改参数" "修改面板地址" "内存调优" "切换 Agent 实现" "──" "卸载实例")
   pick "批量操作" "共 ${#SVC[@]} 个服务实例" "${actions[@]}" || return 0
 
   local act
@@ -3115,9 +3136,10 @@ cmd_batch() {
     2) act="start" ;;
     4) act="upgrade" ;;
     5) act="params" ;;
-    6) act="memtune" ;;
-    7) act="switch" ;;
-    9) act="remove" ;;
+    6) act="addr" ;;
+    7) act="memtune" ;;
+    8) act="switch" ;;
+    10) act="remove" ;;
     *) return 0 ;;
   esac
   local act_cn
@@ -3127,6 +3149,7 @@ cmd_batch() {
     start)   act_cn="启动" ;;
     upgrade) act_cn="升级" ;;
     params)  act_cn="修改参数" ;;
+    addr)    act_cn="修改面板地址" ;;
     memtune) act_cn="内存调优" ;;
     switch)  act_cn="切换实现" ;;
     *)       act_cn="卸载" ;;
@@ -3176,6 +3199,17 @@ cmd_batch() {
     return 0
   fi
 
+  local new_ep=""
+  if [ "$act" = "addr" ]; then
+    local def_ep="${D_EP[${targets[0]}]:-}"
+    ask "新的面板地址（如 https://panel.example.com）" "$def_ep" new_ep
+    case "$new_ep" in
+      http://*|https://*) ;;
+      *) warn "必须以 http:// 或 https:// 开头"; return 1 ;;
+    esac
+    new_ep="${new_ep%/}"
+  fi
+
   # 批量改参数：先编辑一次，再套用到每个选中实例
   if [ "$act" = "params" ]; then
     local first="${targets[0]}"
@@ -3197,6 +3231,8 @@ cmd_batch() {
   blank
   if [ "$act" = "remove" ]; then
     warn "将卸载 ${#targets[@]} 个实例（停服务并删除目录）"
+  elif [ "$act" = "addr" ]; then
+    warn "将把 ${#targets[@]} 个实例的面板地址改为：$new_ep"
   else
     warn "将对 ${#targets[@]} 个实例执行：$act_cn"
   fi
@@ -3207,7 +3243,7 @@ cmd_batch() {
   ask "确认? (y/N)" "N" go
   case "$go" in [Yy]*) ;; *) warn "已取消"; return 0 ;; esac
 
-  if [ "$act" = "upgrade" ] || [ "$act" = "params" ]; then
+  if [ "$act" = "upgrade" ] || [ "$act" = "params" ] || [ "$act" = "addr" ]; then
     fetch_installer || die "下载安装脚本失败"
   fi
   if [ "$act" = "switch" ]; then
@@ -3228,6 +3264,8 @@ cmd_batch() {
         if upgrade_apply "$i"; then okc=$((okc + 1)); fi ;;
       params)
         if params_apply "$i"; then okc=$((okc + 1)); fi ;;
+      addr)
+        if set_endpoint_for "$i" "$new_ep"; then okc=$((okc + 1)); fi ;;
       memtune)
         if tune_service_env "${D_NAME[$i]}" "${D_KIND[$i]}"; then
           svc_ctl restart "${D_NAME[$i]}" "${D_KIND[$i]}" >/dev/null 2>&1 || true
@@ -3245,6 +3283,10 @@ cmd_batch() {
   done
   if [ "$act" = "switch" ] && [ "$okc" -gt 0 ]; then
     AGENT_IMPL="$switch_impl"
+    save_conf
+  fi
+  if [ "$act" = "addr" ] && [ "$okc" -gt 0 ]; then
+    ENDPOINT="$new_ep"
     save_conf
   fi
   blank
