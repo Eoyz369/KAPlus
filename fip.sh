@@ -1,5 +1,5 @@
 #!/bin/sh
-# fip-v5.6.sh — 宿主机假网卡 + 按国家加地址（Cloudflare CSV）
+# fip-v5.9.sh — 宿主机假网卡 + 按国家加地址（Cloudflare CSV）
 #
 # 一个「加地址」入口，三种来源：
 #   1. 内置（朝鲜：2606:54c1:1:c4::/64、175.45.176.0/22、4 个 /32）
@@ -12,7 +12,7 @@
 # noprefixroute 的作用：地址照样显示，但不生成「这个网段在这张卡上」的直连路由，
 # 避免把去往真实 IP（比如 Cloudflare 的段）的流量带进黑洞。
 #
-# 版本规则：每次改动 +0.1，新建文件，旧版本保留（fip-v5.6.sh → fip-v5.7.sh）。
+# 版本规则：每次改动 +0.1，新建文件，旧版本保留（fip-v5.9.sh → fip-v6.0.sh）。
 #
 # 用法：
 #   fip                    菜单
@@ -44,7 +44,7 @@
 #   FIP_COLOR=0                  关颜色
 set -u
 
-VERSION="5.6"
+VERSION="5.9"
 
 DEV="${FIP_DEV:-fip0}"
 DEV_TYPE="${FIP_TYPE:-dummy}"
@@ -55,6 +55,13 @@ CSV_CACHE="${FIP_CSV_CACHE:-/var/tmp/fip-country.csv}"
 CONF="${FIP_CONF:-/etc/fip.conf}"
 CSV_TTL="${CSV_TTL:-0}"
 STATE="${FIP_STATE:-/etc/fip/state}"
+LAST_SEL=""; LAST_N=0
+LAST_FILE="${FIP_LAST:-/etc/fip/last}"
+if [ -s "$LAST_FILE" ]; then
+  IFS="|" read -r _ls _ln < "$LAST_FILE" 2>/dev/null || true
+  [ -n "${_ls:-}" ] && LAST_SEL="$_ls"
+  [ -n "${_ln:-}" ] && LAST_N="$_ln"
+fi
 LOG="${FIP_LOG:-/var/log/fip.log}"
 LOG_MAX_KB="${LOG_MAX_KB:-512}"
 LOG_KEEP="${LOG_KEEP:-3}"
@@ -748,6 +755,13 @@ cmd_status() {
   return 0
 }
 
+save_last() {
+  [ -n "$LAST_SEL" ] || return 0
+  mkdir -p "$(dirname "$LAST_FILE")" 2>/dev/null || true
+  printf '%s|%s\n' "$LAST_SEL" "$LAST_N" > "$LAST_FILE" 2>/dev/null
+  return 0
+}
+
 # 解析序号选择：1 3 5-8 all
 expand_sel() {
   _in="$1"; _max="$2"
@@ -1202,6 +1216,8 @@ apply_country_all() {
   fi
   _cnt=$(printf '%s\n' "$_list" | grep -c .)
   [ "$_cnt" -gt 0 ] || { err "没有可用段"; return 1; }
+  LAST_SEL="${_only:-全部}"; LAST_N="$_cnt"
+  save_last
   hr "所有国家"
   kvp "国家数" "$_cnt"
   kvp "形式" "$( [ "$_form" = "one" ] && echo '每个国家一个单 IP' || echo '每个国家一条段' )"
@@ -1250,8 +1266,15 @@ ui_country_pick() {
   [ -n "$UI_IN" ] || { dim "已取消"; return 0; }
   fetch_csv || { err "下载失败：$CSV_URL"; return 1; }
   csv_ok || { err "CSV 里没找到 country / ip 列"; return 1; }
+  _raw_sel="$UI_IN"
   _codes="$(resolve_country_arg "$(printf '%s' "$UI_IN" | tr ',' ' ')")"
   [ -n "$_codes" ] || { err "没有解析出国家"; return 0; }
+  _codes_n=$(printf '%s\n' $_codes | grep -c .)
+  echo
+  kvp "选择" "$_raw_sel"
+  kvp "国家数" "$_codes_n"
+  [ "$_codes_n" -gt 8 ] && dim "（$(printf '%s' "$_codes" | cut -c1-72)…）" || dim "（$_codes）"
+  if ! ask "继续？"; then dim "已取消"; return 0; fi
   readline "形式 [1=每个国家一条段 2=每个国家一个单 IP，回车=2]：" "2"
   [ "$UI_IN" = "1" ] && _form=seg || _form=one
   readline "协议 [1=IPv4 2=IPv6 3=都，回车=3]：" "3"
@@ -1271,6 +1294,8 @@ ui_country_pick() {
   fi
   echo
   apply_country_all "$_form" "$_fam" "$_per" "$_codes"
+  LAST_SEL="$_raw_sel"; LAST_N="$_codes_n"
+  save_last
 }
 
 ui_country_all() {
@@ -1652,14 +1677,22 @@ cmd_menu() {
     echo
     _devs="$(fip_devs)"
     if [ -n "$_devs" ]; then
+      _sum_n=0; _sum_d=0
       for _d in $_devs; do
         _n="$(ip -o addr show dev "$_d" scope global 2>/dev/null | grep -c .)"
+        _sum_d=$(( _sum_d + 1 )); _sum_n=$(( _sum_n + _n ))
         _v6="$(ip -6 -o addr show dev "$_d" scope global 2>/dev/null | awk '{print $4}' | head -1)"
         _v4="$(ip -4 -o addr show dev "$_d" scope global 2>/dev/null | awk '{print $4}' | head -1)"
         printf '   %s┃%s %s◈%s %s%s%s  %s 条  %s\n' \
           "$BORD" "$RST" "$SKY_B" "$RST" "$BOLD_W" "$_d" "$RST" "$_n" \
           "${_v6:-}${_v4:+ / $_v4}"
       done
+      printf '   %s┃%s %s◈%s 合计 %s%s 张，%s 条%s\n' \
+        "$BORD" "$RST" "$ORNG_B" "$RST" "$BOLD_W" "$_sum_d" "$_sum_n" "$RST"
+      if [ -n "$LAST_SEL" ]; then
+        printf '   %s┃%s %s◈%s 上次 %s%s%s（%s 个国家）\n' \
+          "$BORD" "$RST" "$VIO_B" "$RST" "$BOLD_W" "$(printf '%s' "$LAST_SEL" | cut -c1-28)" "$RST" "$LAST_N"
+      fi
     else
       printf '   %s┃%s %s◈%s 设备 %s（未建）\n' "$BORD" "$RST" "$SKY_B" "$RST" "$DEV"
     fi
@@ -1852,7 +1885,7 @@ usage() {
   FIP_MENU=0                   无参数不进菜单
 
 安装：
-  install -m 755 fip-v5.6.sh /usr/local/bin/fip
+  install -m 755 fip-v5.9.sh /usr/local/bin/fip
 EOF
 }
 
@@ -1876,6 +1909,11 @@ case "${1:-}" in
           cmd_add --country "$_cc" "$@" ;;
       esac ;;
   log|logs)           cmd_log "${2:-status}" "${3:-30}" ;;
+  last|lastsel)
+      case "${2:-show}" in
+        clear|rm) rm -f "$LAST_FILE"; LAST_SEL=""; LAST_N=0; ok "已清除上次记录" ;;
+        *) if [ -n "$LAST_SEL" ]; then kvp "上次" "$LAST_SEL（$LAST_N 个国家）"; else dim "没有记录"; fi ;;
+      esac ;;
   save)               save_state ;;
   restore)            restore_state ;;
   unsave)             unsave_state ;;
